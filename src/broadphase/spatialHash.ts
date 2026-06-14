@@ -13,6 +13,7 @@ export function runSpatialHashBroadPhase(bodies: Body[], cellSize: number): Broa
   const startedAt = performance.now();
   const buckets = new Map<number, number[]>();
   const columns = Math.ceil(960 / cellSize) + 2;
+  let bucketEntries = 0;
   pairs.clear();
 
   for (let index = 0; index < bodies.length; index += 1) {
@@ -31,6 +32,7 @@ export function runSpatialHashBroadPhase(bodies: Body[], cellSize: number): Broa
           buckets.set(key, bucket);
         }
         bucket.push(index);
+        bucketEntries += 1;
       }
     }
   }
@@ -62,7 +64,9 @@ export function runSpatialHashBroadPhase(bodies: Body[], cellSize: number): Broa
     duration: performance.now() - startedAt,
     auxiliaryChecks,
     orderingSwaps: 0,
+    bucketEntries,
     bucketCount: buckets.size,
     maxBucketSize,
+    usedFullSort: false,
   };
 }

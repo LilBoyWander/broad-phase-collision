@@ -19,7 +19,7 @@ export class SweepAndPrune {
 
   run(bodies: Body[]): BroadPhaseResult {
     const startedAt = performance.now();
-    this.syncIntervals(bodies);
+    const usedFullSort = this.syncIntervals(bodies);
     this.pairs.clear();
 
     let swaps = 0;
@@ -67,8 +67,10 @@ export class SweepAndPrune {
       duration: performance.now() - startedAt,
       auxiliaryChecks: overlapChecks,
       orderingSwaps: swaps,
+      bucketEntries: 0,
       bucketCount: 0,
       maxBucketSize: 0,
+      usedFullSort,
     };
   }
 
@@ -76,7 +78,7 @@ export class SweepAndPrune {
     this.intervals.length = 0;
   }
 
-  private syncIntervals(bodies: Body[]): void {
+  private syncIntervals(bodies: Body[]): boolean {
     if (this.intervals.length !== bodies.length) {
       this.intervals.length = 0;
       for (let index = 0; index < bodies.length; index += 1) {
@@ -87,7 +89,7 @@ export class SweepAndPrune {
         });
       }
       this.intervals.sort((first, second) => first.min - second.min);
-      return;
+      return true;
     }
 
     for (const interval of this.intervals) {
@@ -95,5 +97,6 @@ export class SweepAndPrune {
       interval.min = body.x - body.radius;
       interval.max = body.x + body.radius;
     }
+    return false;
   }
 }

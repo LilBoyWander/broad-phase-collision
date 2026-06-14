@@ -27,7 +27,7 @@ export function createBodies(count: number, scenario: ScenarioName): Body[] {
   ];
 
   for (let index = 0; index < count; index += 1) {
-    let radius = 5 + random() * 5;
+    let radius = 4 + random() * 3.5;
     let x = radius + random() * (WORLD_WIDTH - radius * 2);
     let y = radius + random() * (WORLD_HEIGHT - radius * 2);
     let velocityX = (random() - 0.5) * 86;

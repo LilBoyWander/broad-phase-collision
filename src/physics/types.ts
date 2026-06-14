@@ -28,8 +28,10 @@ export interface BroadPhaseResult {
   duration: number;
   auxiliaryChecks: number;
   orderingSwaps: number;
+  bucketEntries: number;
   bucketCount: number;
   maxBucketSize: number;
+  usedFullSort: boolean;
 }
 
 export type BroadPhaseMethod = 'naive' | 'spatial' | 'sweep';

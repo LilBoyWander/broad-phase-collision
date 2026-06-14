@@ -27,8 +27,10 @@ interface PipelineStats {
   impulsesApplied: number;
   auxiliaryChecks: number;
   orderingSwaps: number;
+  bucketEntries: number;
   bucketCount: number;
   maxBucketSize: number;
+  usedFullSort: boolean;
 }
 
 interface AuditResult {
@@ -47,6 +49,7 @@ interface MethodComparison {
   recall: number;
   auxiliaryChecks: number;
   orderingSwaps: number;
+  usedFullSort: boolean;
 }
 
 interface AppElements {
@@ -62,6 +65,7 @@ interface AppElements {
   responseToggle: HTMLInputElement;
   pairsToggle: HTMLInputElement;
   contactsToggle: HTMLInputElement;
+  trailsToggle: HTMLInputElement;
   gridToggle: HTMLInputElement;
   bodySlider: HTMLInputElement;
   bodyValue: HTMLElement;
@@ -82,6 +86,8 @@ interface AppElements {
   theoreticalPairs: HTMLElement;
   candidateCount: HTMLElement;
   contactCount: HTMLElement;
+  canvasRecall: HTMLElement;
+  canvasRecallLabel: HTMLElement;
   falsePositiveCount: HTMLElement;
   rejectionRate: HTMLElement;
   broadTime: HTMLElement;
@@ -89,8 +95,15 @@ interface AppElements {
   responseTime: HTMLElement;
   auxiliaryChecks: HTMLElement;
   orderingSwaps: HTMLElement;
+  bucketEntries: HTMLElement;
   bucketCount: HTMLElement;
   maxBucketSize: HTMLElement;
+  insightTitle: HTMLElement;
+  insightBody: HTMLElement;
+  insightPrimaryLabel: HTMLElement;
+  insightPrimaryValue: HTMLElement;
+  insightSecondaryLabel: HTMLElement;
+  insightSecondaryValue: HTMLElement;
   auditStatus: HTMLElement;
   auditRecall: HTMLElement;
   auditMissed: HTMLElement;
@@ -140,6 +153,7 @@ export class CollisionPipelineApp {
   private resolveResponse = true;
   private showPairs = false;
   private showContacts = true;
+  private showTrails = true;
   private showGrid = true;
   private lastFrameStart = performance.now();
   private frameInterval = 1000 / 60;
@@ -149,6 +163,7 @@ export class CollisionPipelineApp {
   private updateDuration = 0;
   private renderDuration = 0;
   private countDebounceId: number | null = null;
+  private auditDebounceId: number | null = null;
   private stats: PipelineStats = {
     broadDuration: 0,
     narrowDuration: 0,
@@ -159,8 +174,10 @@ export class CollisionPipelineApp {
     impulsesApplied: 0,
     auxiliaryChecks: 0,
     orderingSwaps: 0,
+    bucketEntries: 0,
     bucketCount: 0,
     maxBucketSize: 0,
+    usedFullSort: false,
   };
   private audit: AuditResult | null = null;
   private comparison: MethodComparison[] = [];
@@ -184,7 +201,7 @@ export class CollisionPipelineApp {
     this.resetBodies(DEFAULT_BODY_COUNT);
     this.bindEvents();
     this.syncControls();
-    window.setTimeout(() => void this.runAudit(), 400);
+    this.scheduleAudit(400);
     requestAnimationFrame((timestamp) => this.loop(timestamp));
   }
 
@@ -219,7 +236,7 @@ export class CollisionPipelineApp {
       this.syncControls();
       this.updateAuditTelemetry();
       this.updateComparisonTelemetry();
-      window.setTimeout(() => void this.runAudit(), 100);
+      this.scheduleAudit(100);
     });
 
     this.elements.stressButton.addEventListener('click', () => {
@@ -237,6 +254,7 @@ export class CollisionPipelineApp {
           this.audit = null;
           this.syncControls();
           this.updateAuditTelemetry();
+          this.scheduleAudit(100);
         }
       });
     });
@@ -263,6 +281,7 @@ export class CollisionPipelineApp {
       this.elements.cellValue.textContent = `${this.cellSize} px`;
       this.audit = null;
       this.updateAuditTelemetry();
+      this.scheduleAudit(220);
     });
     this.elements.scenarioSelect.addEventListener('change', () => {
       const scenario = this.elements.scenarioSelect.value;
@@ -279,7 +298,7 @@ export class CollisionPipelineApp {
         this.comparison = [];
         this.updateAuditTelemetry();
         this.updateComparisonTelemetry();
-        window.setTimeout(() => void this.runAudit(), 100);
+        this.scheduleAudit(100);
       }
     });
 
@@ -294,6 +313,9 @@ export class CollisionPipelineApp {
     });
     this.elements.contactsToggle.addEventListener('change', () => {
       this.showContacts = this.elements.contactsToggle.checked;
+    });
+    this.elements.trailsToggle.addEventListener('change', () => {
+      this.showTrails = this.elements.trailsToggle.checked;
     });
     this.elements.gridToggle.addEventListener('change', () => {
       this.showGrid = this.elements.gridToggle.checked;
@@ -313,7 +335,10 @@ export class CollisionPipelineApp {
       if (event.key === '1' || event.key === '2' || event.key === '3') {
         this.method = event.key === '1' ? 'naive' : event.key === '2' ? 'spatial' : 'sweep';
         this.sweep.reset();
+        this.audit = null;
         this.syncControls();
+        this.updateAuditTelemetry();
+        this.scheduleAudit(100);
       }
     });
   }
@@ -354,6 +379,7 @@ export class CollisionPipelineApp {
       this.updateFrameTelemetry();
     }
     this.updatePipelineTelemetry();
+    this.updateInsightTelemetry();
 
     requestAnimationFrame((timestamp) => this.loop(timestamp));
   }
@@ -369,6 +395,10 @@ export class CollisionPipelineApp {
   }
 
   private async runAudit(): Promise<void> {
+    if (this.auditDebounceId !== null) {
+      window.clearTimeout(this.auditDebounceId);
+      this.auditDebounceId = null;
+    }
     this.elements.auditButton.disabled = true;
     this.elements.auditStatus.textContent = 'Checking every possible pair...';
     await new Promise<void>((resolve) => window.setTimeout(resolve, 20));
@@ -415,6 +445,16 @@ export class CollisionPipelineApp {
     };
     this.elements.auditButton.disabled = false;
     this.updateAuditTelemetry();
+  }
+
+  private scheduleAudit(delay: number): void {
+    if (this.auditDebounceId !== null) {
+      window.clearTimeout(this.auditDebounceId);
+    }
+    this.auditDebounceId = window.setTimeout(() => {
+      this.auditDebounceId = null;
+      void this.runAudit();
+    }, delay);
   }
 
   private async runComparison(): Promise<void> {
@@ -476,6 +516,7 @@ export class CollisionPipelineApp {
         recall: oracleContacts.size === 0 ? 100 : ((oracleContacts.size - missed) / oracleContacts.size) * 100,
         auxiliaryChecks: result.auxiliaryChecks,
         orderingSwaps: result.orderingSwaps,
+        usedFullSort: result.usedFullSort,
       };
     });
 
@@ -500,8 +541,10 @@ export class CollisionPipelineApp {
       impulsesApplied: response.impulsesApplied,
       auxiliaryChecks: broad.auxiliaryChecks,
       orderingSwaps: broad.orderingSwaps,
+      bucketEntries: broad.bucketEntries,
       bucketCount: broad.bucketCount,
       maxBucketSize: broad.maxBucketSize,
+      usedFullSort: broad.usedFullSort,
     };
   }
 
@@ -525,6 +568,7 @@ export class CollisionPipelineApp {
     this.comparison = [];
     this.updateAuditTelemetry();
     this.updateComparisonTelemetry();
+    this.scheduleAudit(180);
   }
 
   private renderCanvas(): void {
@@ -578,6 +622,19 @@ export class CollisionPipelineApp {
       context.stroke();
     }
 
+    if (this.showTrails) {
+      context.strokeStyle = midnight ? 'rgba(145, 184, 243, 0.24)' : 'rgba(69, 108, 168, 0.2)';
+      context.lineWidth = 1;
+      context.beginPath();
+      for (const body of this.bodies) {
+        const movementX = body.x - body.previousX;
+        const movementY = body.y - body.previousY;
+        context.moveTo(body.x, body.y);
+        context.lineTo(body.x - movementX * 5, body.y - movementY * 5);
+      }
+      context.stroke();
+    }
+
     const bodyColors = midnight
       ? ['#73d1c5', '#91b8f3', '#9be0a8']
       : ['#147f85', '#456ca8', '#3f8a58'];
@@ -624,12 +681,15 @@ export class CollisionPipelineApp {
     this.elements.contactCount.textContent = this.stats.contactCount.toLocaleString();
     this.elements.falsePositiveCount.textContent = this.stats.falsePositiveCount.toLocaleString();
     this.elements.rejectionRate.textContent = `${Math.max(0, rejected).toFixed(1)}%`;
-    this.elements.broadTime.textContent = this.stats.broadDuration.toFixed(2);
-    this.elements.narrowTime.textContent = this.stats.narrowDuration.toFixed(2);
-    this.elements.responseTime.textContent = this.stats.responseDuration.toFixed(2);
+    this.elements.broadTime.textContent = this.formatDuration(this.stats.broadDuration);
+    this.elements.narrowTime.textContent = this.formatDuration(this.stats.narrowDuration);
+    this.elements.responseTime.textContent = this.formatDuration(this.stats.responseDuration);
     this.elements.auxiliaryChecks.textContent = this.stats.auxiliaryChecks.toLocaleString();
     this.elements.orderingSwaps.textContent = this.method === 'sweep'
-      ? this.stats.orderingSwaps.toLocaleString()
+      ? this.stats.usedFullSort ? 'cold sort' : this.stats.orderingSwaps.toLocaleString()
+      : '—';
+    this.elements.bucketEntries.textContent = this.method === 'spatial'
+      ? this.stats.bucketEntries.toLocaleString()
       : '—';
     this.elements.bucketCount.textContent = this.method === 'spatial'
       ? this.stats.bucketCount.toLocaleString()
@@ -637,6 +697,10 @@ export class CollisionPipelineApp {
     this.elements.maxBucketSize.textContent = this.method === 'spatial'
       ? this.stats.maxBucketSize.toLocaleString()
       : '—';
+  }
+
+  private formatDuration(duration: number): string {
+    return duration > 0 && duration < 0.01 ? '<0.01' : duration.toFixed(2);
   }
 
   private updateFrameTelemetry(): void {
@@ -661,6 +725,9 @@ export class CollisionPipelineApp {
       this.elements.auditStatus.classList.remove('telemetry-failure');
       this.elements.auditRecall.classList.remove('telemetry-failure');
       this.elements.auditMissed.classList.remove('telemetry-failure');
+      this.elements.canvasRecall.textContent = 'Not audited';
+      this.elements.canvasRecallLabel.textContent = 'Snapshot recall';
+      this.elements.canvasRecall.parentElement?.classList.remove('canvas-recall--pass', 'canvas-recall--fail');
       return;
     }
 
@@ -674,6 +741,12 @@ export class CollisionPipelineApp {
     this.elements.auditStatus.classList.toggle('telemetry-failure', failed);
     this.elements.auditRecall.classList.toggle('telemetry-failure', failed);
     this.elements.auditMissed.classList.toggle('telemetry-failure', failed);
+    this.elements.canvasRecall.textContent = `${this.audit.recall.toFixed(1)}%`;
+    this.elements.canvasRecallLabel.textContent = failed
+      ? `${this.audit.missedContacts.toLocaleString()} missed`
+      : 'Snapshot recall';
+    this.elements.canvasRecall.parentElement?.classList.toggle('canvas-recall--pass', !failed);
+    this.elements.canvasRecall.parentElement?.classList.toggle('canvas-recall--fail', failed);
   }
 
   private updateComparisonTelemetry(): void {
@@ -709,7 +782,9 @@ export class CollisionPipelineApp {
       }
       time.textContent = `${result.duration.toFixed(2)} ms`;
       const swapDetail = method === 'sweep'
-        ? ` · ${result.orderingSwaps.toLocaleString()} order swaps`
+        ? result.usedFullSort
+          ? ' · cold full sort'
+          : ` · ${result.orderingSwaps.toLocaleString()} order swaps`
         : '';
       candidates.textContent =
         `${result.candidates.toLocaleString()} candidates · ${result.auxiliaryChecks.toLocaleString()} pair checks${swapDetail}`;
@@ -736,6 +811,68 @@ export class CollisionPipelineApp {
     );
   }
 
+  private updateInsightTelemetry(): void {
+    const possiblePairs = (this.bodies.length * (this.bodies.length - 1)) / 2;
+    const candidateRatio = possiblePairs === 0
+      ? 0
+      : (this.stats.candidateCount / possiblePairs) * 100;
+    const scenarioLesson: Record<ScenarioName, string> = {
+      uniform: 'Evenly distributed, similarly sized bodies are friendly to fixed grids and coherent sweeps.',
+      clusters: 'Dense clusters create legitimate local work, so every method must pass more pairs onward.',
+      horizontal: 'Horizontal lanes keep Y overlap narrow, helping the sweep’s secondary Y filter.',
+      mixed: 'Mixed radii make one hash cell size a compromise and increase multi-cell insertion.',
+      giant: 'Giant bodies span many cells and expose duplicate hash work before deduplication.',
+    };
+
+    if (this.method === 'spatial') {
+      const entriesPerBody = this.bodies.length === 0
+        ? 0
+        : this.stats.bucketEntries / this.bodies.length;
+      const checksPerCandidate = this.stats.candidateCount === 0
+        ? 0
+        : this.stats.auxiliaryChecks / this.stats.candidateCount;
+      this.elements.insightTitle.textContent = entriesPerBody > 6 || checksPerCandidate > 2.5
+        ? 'The grid is paying duplication tax.'
+        : 'The grid is keeping work local.';
+      this.elements.insightBody.textContent =
+        `${scenarioLesson[this.scenario]} Adjust cell size and watch both values below: smaller is not automatically better.`;
+      this.elements.insightPrimaryLabel.textContent = 'Cell entries / body';
+      this.elements.insightPrimaryValue.textContent = entriesPerBody.toFixed(1);
+      this.elements.insightSecondaryLabel.textContent = 'Bucket checks / candidate';
+      this.elements.insightSecondaryValue.textContent = checksPerCandidate.toFixed(1);
+      return;
+    }
+
+    if (this.method === 'sweep') {
+      const swapsPerBody = this.bodies.length === 0
+        ? 0
+        : this.stats.orderingSwaps / this.bodies.length;
+      const checksPerCandidate = this.stats.candidateCount === 0
+        ? 0
+        : this.stats.auxiliaryChecks / this.stats.candidateCount;
+      this.elements.insightTitle.textContent = this.stats.usedFullSort
+        ? 'Cold start: build the X ordering.'
+        : swapsPerBody < 0.5
+          ? 'Temporal coherence is doing the sorting work.'
+          : 'Fast motion is disrupting interval order.';
+      this.elements.insightBody.textContent =
+        `${scenarioLesson[this.scenario]} Live frames reuse the prior X order; the swap rate shows how much repair insertion sort needed.`;
+      this.elements.insightPrimaryLabel.textContent = 'Order swaps / body';
+      this.elements.insightPrimaryValue.textContent = this.stats.usedFullSort ? 'cold sort' : swapsPerBody.toFixed(2);
+      this.elements.insightSecondaryLabel.textContent = 'X checks / candidate';
+      this.elements.insightSecondaryValue.textContent = checksPerCandidate.toFixed(1);
+      return;
+    }
+
+    this.elements.insightTitle.textContent = 'The baseline buys certainty with quadratic work.';
+    this.elements.insightBody.textContent =
+      `${scenarioLesson[this.scenario]} Brute force emits every possible pair, so distribution cannot reduce its broad-phase workload.`;
+    this.elements.insightPrimaryLabel.textContent = 'Pairs advanced';
+    this.elements.insightPrimaryValue.textContent = `${candidateRatio.toFixed(1)}%`;
+    this.elements.insightSecondaryLabel.textContent = 'Pairs rejected';
+    this.elements.insightSecondaryValue.textContent = '0%';
+  }
+
   private syncControls(): void {
     this.elements.methodButtons.forEach((button) => {
       const active = button.dataset.method === this.method;
@@ -755,6 +892,7 @@ export class CollisionPipelineApp {
     this.elements.responseToggle.checked = this.resolveResponse;
     this.elements.pairsToggle.checked = this.showPairs;
     this.elements.contactsToggle.checked = this.showContacts;
+    this.elements.trailsToggle.checked = this.showTrails;
     this.elements.gridToggle.checked = this.showGrid;
     this.elements.cellSlider.disabled = this.method !== 'spatial';
     this.elements.gridToggle.disabled = this.method !== 'spatial';
@@ -796,6 +934,7 @@ export class CollisionPipelineApp {
       responseToggle: this.getElement<HTMLInputElement>('#resolve-response'),
       pairsToggle: this.getElement<HTMLInputElement>('#show-pairs'),
       contactsToggle: this.getElement<HTMLInputElement>('#show-contacts'),
+      trailsToggle: this.getElement<HTMLInputElement>('#show-trails'),
       gridToggle: this.getElement<HTMLInputElement>('#show-grid'),
       bodySlider: this.getElement<HTMLInputElement>('#body-slider'),
       bodyValue: this.getElement<HTMLElement>('#body-value'),
@@ -816,6 +955,8 @@ export class CollisionPipelineApp {
       theoreticalPairs: this.getElement<HTMLElement>('#theoretical-pairs'),
       candidateCount: this.getElement<HTMLElement>('#candidate-count'),
       contactCount: this.getElement<HTMLElement>('#contact-count'),
+      canvasRecall: this.getElement<HTMLElement>('#canvas-recall'),
+      canvasRecallLabel: this.getElement<HTMLElement>('#canvas-recall-label'),
       falsePositiveCount: this.getElement<HTMLElement>('#false-positive-count'),
       rejectionRate: this.getElement<HTMLElement>('#rejection-rate'),
       broadTime: this.getElement<HTMLElement>('#broad-time'),
@@ -823,8 +964,15 @@ export class CollisionPipelineApp {
       responseTime: this.getElement<HTMLElement>('#response-time'),
       auxiliaryChecks: this.getElement<HTMLElement>('#auxiliary-checks'),
       orderingSwaps: this.getElement<HTMLElement>('#ordering-swaps'),
+      bucketEntries: this.getElement<HTMLElement>('#bucket-entries'),
       bucketCount: this.getElement<HTMLElement>('#bucket-count'),
       maxBucketSize: this.getElement<HTMLElement>('#max-bucket-size'),
+      insightTitle: this.getElement<HTMLElement>('#insight-title'),
+      insightBody: this.getElement<HTMLElement>('#insight-body'),
+      insightPrimaryLabel: this.getElement<HTMLElement>('#insight-primary-label'),
+      insightPrimaryValue: this.getElement<HTMLElement>('#insight-primary-value'),
+      insightSecondaryLabel: this.getElement<HTMLElement>('#insight-secondary-label'),
+      insightSecondaryValue: this.getElement<HTMLElement>('#insight-secondary-value'),
       auditStatus: this.getElement<HTMLElement>('#audit-status'),
       auditRecall: this.getElement<HTMLElement>('#audit-recall'),
       auditMissed: this.getElement<HTMLElement>('#audit-missed'),
@@ -906,6 +1054,18 @@ export class CollisionPipelineApp {
             </div>
             <p class="method-description" id="method-description"></p>
 
+            <section class="insight-bar" aria-live="polite">
+              <div class="insight-bar__copy">
+                <div class="panel__kicker">Key insight</div>
+                <h3 id="insight-title">Reading the current frame</h3>
+                <p id="insight-body">The selected method and scenario determine which kind of broad-phase work dominates.</p>
+              </div>
+              <div class="insight-signals">
+                <div><span id="insight-primary-label">Primary signal</span><strong id="insight-primary-value">—</strong></div>
+                <div><span id="insight-secondary-label">Secondary signal</span><strong id="insight-secondary-value">—</strong></div>
+              </div>
+            </section>
+
             <div class="canvas-shell">
               <canvas id="collision-canvas" width="${WORLD_BOUNDS.width}" height="${WORLD_BOUNDS.height}" aria-label="Dynamic circle collision simulation"></canvas>
               <div class="canvas-hud">
@@ -917,6 +1077,10 @@ export class CollisionPipelineApp {
               </div>
               <div class="pipeline-strip">
                 <span><b>01</b> Broad phase</span><i></i><span><b>02</b> Narrow phase</span><i></i><span><b>03</b> Response</span>
+              </div>
+              <div class="canvas-recall">
+                <span id="canvas-recall-label">Snapshot recall</span>
+                <strong id="canvas-recall">Not audited</strong>
               </div>
             </div>
             <div class="stage-foot">
@@ -957,6 +1121,7 @@ export class CollisionPipelineApp {
                 <dt>Pairs rejected</dt><dd id="rejection-rate">0.0%</dd>
                 <dt>Broad pair checks</dt><dd id="auxiliary-checks">0</dd>
                 <dt>Sweep order swaps</dt><dd id="ordering-swaps">—</dd>
+                <dt>Hash cell entries</dt><dd id="bucket-entries">—</dd>
                 <dt>Hash buckets</dt><dd id="bucket-count">0</dd>
                 <dt>Max bucket</dt><dd id="max-bucket-size">0</dd>
               </dl>
@@ -968,6 +1133,7 @@ export class CollisionPipelineApp {
                 <label class="toggle"><span><b>Resolve contacts</b><small>Apply correction and impulses</small></span><span class="switch"><input id="resolve-response" type="checkbox" checked /><i></i></span></label>
                 <label class="toggle"><span><b>Candidate lines</b><small>Shown when candidate count is manageable</small></span><span class="switch"><input id="show-pairs" type="checkbox" /><i></i></span></label>
                 <label class="toggle"><span><b>Contact normals</b><small>Exact narrow-phase result</small></span><span class="switch"><input id="show-contacts" type="checkbox" checked /><i></i></span></label>
+                <label class="toggle"><span><b>Motion ticks</b><small>Short per-frame trails without accumulation</small></span><span class="switch"><input id="show-trails" type="checkbox" checked /><i></i></span></label>
                 <label class="toggle"><span><b>Spatial grid</b><small>Available in hash mode</small></span><span class="switch"><input id="show-grid" type="checkbox" checked /><i></i></span></label>
                 <label class="toggle"><span><b>Pause simulation</b><small>Inspect one stable snapshot</small></span><span class="switch"><input id="pause-sim" type="checkbox" /><i></i></span></label>
               </div>

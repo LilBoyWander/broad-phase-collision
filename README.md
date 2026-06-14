@@ -24,7 +24,7 @@ The broad phase reduces that search space. It may return false positives, but it
 
 | Stage | Responsibility | Measured output |
 | --- | --- | --- |
-| Broad phase | Conservatively propose potentially overlapping pairs | Candidates, duration, internal checks |
+| Broad phase | Conservatively propose potentially overlapping pairs | Candidates, duration, method-specific work |
 | Narrow phase | Run exact circle-circle tests | Contacts, false positives, duration |
 | Response | Correct penetration and apply restitution impulses | Applied impulses, duration |
 | Audit | Compare broad-phase output with brute-force truth | Contact recall, missed contacts |
@@ -48,6 +48,12 @@ This educational implementation uses one sorted axis: X. It only scans overlappi
 Interval order is retained between live frames and repaired with insertion sort, allowing temporal coherence to reduce sorting work. A full sort occurs only when the interval set is initialized or reset. Horizontal crowding weakens the chosen axis.
 
 Candidate counts are not perfectly symmetric across methods. Spatial hash candidates are deduplicated pairs that shared at least one cell, while sweep-and-prune candidates have already passed both X and Y AABB overlap tests. The UI therefore reports broad pair checks separately from emitted candidates, and reports sweep ordering swaps separately. The same-snapshot benchmark includes sweep-and-prune's cold-start sort; live telemetry shows its warm-frame behavior.
+
+The **Key insight** panel translates those counters into method-specific signals:
+
+- Spatial hash shows cell entries per body and bucket checks per emitted candidate, making poor cell sizing visible.
+- Sweep-and-prune shows insertion-sort swaps per body, making temporal coherence visible from frame to frame.
+- Brute force shows that it advances 100% of theoretical pairs regardless of distribution.
 
 ## Scenario Matrix
 
@@ -86,7 +92,7 @@ npm run check
 - Change body count, motion speed, restitution, scenario, and spatial-hash cell size.
 - Switch methods with the UI or keys `1`, `2`, and `3`.
 - Press `Space` to pause the simulation.
-- Toggle candidate lines, exact contact normals, response, and the spatial grid.
+- Toggle candidate lines, exact contact normals, short motion ticks, response, and the spatial grid.
 - Add 250 bodies at a time with the stress control, up to 2,000.
 
 Candidate lines are intentionally hidden when their count becomes too large to remain useful.
@@ -98,7 +104,7 @@ Candidate lines are intentionally hidden when their count becomes too large to r
 - Spatial hashing inserts full circle AABBs rather than only center points.
 - Shared-cell hash pairs are deduplicated before narrow-phase testing.
 - Sweep-and-prune preserves its previous X ordering and uses insertion sort on subsequent live frames.
-- The renderer clears the canvas every frame and uses body outlines rather than accumulated trails.
+- The renderer clears the canvas every frame and uses body outlines plus short per-frame motion ticks rather than accumulated trails.
 - Position correction is weighted by inverse mass.
 - Restitution impulses are applied only when bodies are moving toward one another.
 - Audit work is measured separately and does not contaminate live pipeline timings.
