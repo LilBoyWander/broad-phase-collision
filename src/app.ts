@@ -8,6 +8,7 @@ import {
   type NarrowPhaseResult,
   type ResponseResult,
 } from './physics/collision';
+import { resolveTunneling } from './physics/continuous';
 import type {
   Body,
   BroadPhaseMethod,
@@ -24,6 +25,7 @@ interface PipelineStats {
   candidateCount: number;
   contactCount: number;
   falsePositiveCount: number;
+  tunnelingSaves: number;
   impulsesApplied: number;
   auxiliaryChecks: number;
   orderingSwaps: number;
@@ -52,6 +54,16 @@ interface MethodComparison {
   usedFullSort: boolean;
 }
 
+interface ScalingPoint {
+  count: number;
+  duration: number;
+}
+
+interface ScalingSeries {
+  method: BroadPhaseMethod;
+  points: ScalingPoint[];
+}
+
 interface AppElements {
   themeButton: HTMLButtonElement;
   notesButton: HTMLButtonElement;
@@ -63,6 +75,7 @@ interface AppElements {
   auditButton: HTMLButtonElement;
   pauseToggle: HTMLInputElement;
   responseToggle: HTMLInputElement;
+  ccdToggle: HTMLInputElement;
   pairsToggle: HTMLInputElement;
   contactsToggle: HTMLInputElement;
   trailsToggle: HTMLInputElement;
@@ -89,6 +102,10 @@ interface AppElements {
   canvasRecall: HTMLElement;
   canvasRecallLabel: HTMLElement;
   falsePositiveCount: HTMLElement;
+  falsePositiveRate: HTMLElement;
+  tunnelingSaves: HTMLElement;
+  stageRecall: HTMLElement;
+  stageMissed: HTMLElement;
   rejectionRate: HTMLElement;
   broadTime: HTMLElement;
   narrowTime: HTMLElement;
@@ -118,6 +135,18 @@ interface AppElements {
   comparisonSweepTime: HTMLElement;
   comparisonSweepCandidates: HTMLElement;
   comparisonSweepRecall: HTMLElement;
+  versusActiveToggle: HTMLInputElement;
+  versusSelectA: HTMLSelectElement;
+  versusSelectB: HTMLSelectElement;
+  versusCanvasA: HTMLCanvasElement;
+  versusCanvasB: HTMLCanvasElement;
+  versusNameA: HTMLElement;
+  versusNameB: HTMLElement;
+  versusStatsA: HTMLElement;
+  versusStatsB: HTMLElement;
+  scalingButton: HTMLButtonElement;
+  scalingStatus: HTMLElement;
+  scalingCanvas: HTMLCanvasElement;
 }
 
 type ThemeName = 'paper' | 'midnight';
@@ -126,6 +155,18 @@ const DEFAULT_BODY_COUNT = 850;
 const MAX_BODY_COUNT = 2000;
 const DEFAULT_CELL_SIZE = 32;
 const CANDIDATE_LINE_LIMIT = 420;
+const SCALING_COUNTS = [100, 300, 600, 1000, 1500, 2000];
+
+/** Rounds an axis maximum up to a clean 1/2/5 × 10ⁿ value so chart gridlines read well. */
+function niceCeil(value: number): number {
+  if (value <= 0) {
+    return 1;
+  }
+  const magnitude = 10 ** Math.floor(Math.log10(value));
+  const normalized = value / magnitude;
+  const step = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
+  return step * magnitude;
+}
 
 /**
  * Runs the complete collision pipeline and keeps each stage observable.
@@ -137,9 +178,16 @@ export class CollisionPipelineApp {
   private readonly root: HTMLDivElement;
   private readonly sweep = new SweepAndPrune();
   private readonly comparisonSweep = new SweepAndPrune();
+  private readonly versusSweepA = new SweepAndPrune();
+  private readonly versusSweepB = new SweepAndPrune();
 
   private elements!: AppElements;
   private context!: CanvasRenderingContext2D;
+  private versusContextA: CanvasRenderingContext2D | null = null;
+  private versusContextB: CanvasRenderingContext2D | null = null;
+  private versusActive = true;
+  private versusMethodA: BroadPhaseMethod = 'spatial';
+  private versusMethodB: BroadPhaseMethod = 'sweep';
   private bodies: Body[] = [];
   private contacts: Contact[] = [];
   private broadResult: BroadPhaseResult | null = null;
@@ -151,6 +199,7 @@ export class CollisionPipelineApp {
   private restitution = 0.72;
   private isPaused = false;
   private resolveResponse = true;
+  private ccd = false;
   private showPairs = false;
   private showContacts = true;
   private showTrails = true;
@@ -171,6 +220,7 @@ export class CollisionPipelineApp {
     candidateCount: 0,
     contactCount: 0,
     falsePositiveCount: 0,
+    tunnelingSaves: 0,
     impulsesApplied: 0,
     auxiliaryChecks: 0,
     orderingSwaps: 0,
@@ -181,6 +231,8 @@ export class CollisionPipelineApp {
   };
   private audit: AuditResult | null = null;
   private comparison: MethodComparison[] = [];
+  private scaling: ScalingSeries[] | null = null;
+  private scalingContext: CanvasRenderingContext2D | null = null;
 
   constructor(root: HTMLDivElement) {
     this.root = root;
@@ -195,12 +247,17 @@ export class CollisionPipelineApp {
       throw new Error('Canvas 2D is not supported in this browser.');
     }
     this.context = context;
+    this.versusContextA = this.elements.versusCanvasA.getContext('2d');
+    this.versusContextB = this.elements.versusCanvasB.getContext('2d');
+    this.scalingContext = this.elements.scalingCanvas.getContext('2d');
 
     this.theme = this.getPreferredTheme();
     this.applyTheme();
     this.resetBodies(DEFAULT_BODY_COUNT);
     this.bindEvents();
     this.syncControls();
+    this.syncVersusLabels();
+    this.renderScalingChart();
     this.scheduleAudit(400);
     requestAnimationFrame((timestamp) => this.loop(timestamp));
   }
@@ -209,7 +266,9 @@ export class CollisionPipelineApp {
     this.elements.themeButton.addEventListener('click', () => {
       this.theme = this.theme === 'paper' ? 'midnight' : 'paper';
       this.applyTheme();
+      this.renderScalingChart();
     });
+    this.elements.scalingButton.addEventListener('click', () => void this.runScaling());
     this.elements.notesButton.addEventListener('click', () => this.elements.dialog.showModal());
     this.elements.closeDialogButton.addEventListener('click', () => this.elements.dialog.close());
     this.elements.dialog.addEventListener('click', (event) => {
@@ -233,6 +292,7 @@ export class CollisionPipelineApp {
       this.resetBodies(DEFAULT_BODY_COUNT);
       this.audit = null;
       this.comparison = [];
+      this.resetScaling();
       this.syncControls();
       this.updateAuditTelemetry();
       this.updateComparisonTelemetry();
@@ -296,6 +356,7 @@ export class CollisionPipelineApp {
         this.resetBodies(this.bodies.length);
         this.audit = null;
         this.comparison = [];
+        this.resetScaling();
         this.updateAuditTelemetry();
         this.updateComparisonTelemetry();
         this.scheduleAudit(100);
@@ -308,6 +369,9 @@ export class CollisionPipelineApp {
     this.elements.responseToggle.addEventListener('change', () => {
       this.resolveResponse = this.elements.responseToggle.checked;
     });
+    this.elements.ccdToggle.addEventListener('change', () => {
+      this.ccd = this.elements.ccdToggle.checked;
+    });
     this.elements.pairsToggle.addEventListener('change', () => {
       this.showPairs = this.elements.pairsToggle.checked;
     });
@@ -319,6 +383,29 @@ export class CollisionPipelineApp {
     });
     this.elements.gridToggle.addEventListener('change', () => {
       this.showGrid = this.elements.gridToggle.checked;
+    });
+
+    this.elements.versusActiveToggle.addEventListener('change', () => {
+      this.versusActive = this.elements.versusActiveToggle.checked;
+      if (!this.versusActive) {
+        this.clearVersusPanels();
+      }
+    });
+    this.elements.versusSelectA.addEventListener('change', () => {
+      const method = this.elements.versusSelectA.value;
+      if (method === 'naive' || method === 'spatial' || method === 'sweep') {
+        this.versusMethodA = method;
+        this.versusSweepA.reset();
+        this.syncVersusLabels();
+      }
+    });
+    this.elements.versusSelectB.addEventListener('change', () => {
+      const method = this.elements.versusSelectB.value;
+      if (method === 'naive' || method === 'spatial' || method === 'sweep') {
+        this.versusMethodB = method;
+        this.versusSweepB.reset();
+        this.syncVersusLabels();
+      }
     });
 
     document.addEventListener('keydown', (event) => {
@@ -360,12 +447,21 @@ export class CollisionPipelineApp {
     this.broadResult = this.runBroadPhase(this.method);
     const narrow = detectContacts(this.bodies, this.broadResult.pairs);
     this.contacts = narrow.contacts;
+    let tunnelingSaves = 0;
+    if (this.ccd && !this.isPaused) {
+      const continuous = resolveTunneling(this.bodies, this.broadResult.pairs, narrow.contacts);
+      tunnelingSaves = continuous.saves;
+      if (continuous.contacts.length > 0) {
+        this.contacts = narrow.contacts.concat(continuous.contacts);
+      }
+    }
     let response: ResponseResult = { duration: 0, impulsesApplied: 0 };
     if (this.resolveResponse) {
       response = resolveContacts(this.bodies, this.contacts, this.restitution);
     }
 
     this.stats = this.createPipelineStats(this.broadResult, narrow, response);
+    this.stats.tunnelingSaves = tunnelingSaves;
     const renderStartedAt = performance.now();
     this.renderCanvas();
     this.renderDuration = performance.now() - renderStartedAt;
@@ -380,6 +476,7 @@ export class CollisionPipelineApp {
     }
     this.updatePipelineTelemetry();
     this.updateInsightTelemetry();
+    this.renderVersus();
 
     requestAnimationFrame((timestamp) => this.loop(timestamp));
   }
@@ -389,9 +486,9 @@ export class CollisionPipelineApp {
       return runNaiveBroadPhase(this.bodies);
     }
     if (method === 'spatial') {
-      return runSpatialHashBroadPhase(this.bodies, this.cellSize);
+      return runSpatialHashBroadPhase(this.bodies, this.cellSize, this.ccd);
     }
-    return this.sweep.run(this.bodies);
+    return this.sweep.run(this.bodies, this.ccd);
   }
 
   private async runAudit(): Promise<void> {
@@ -538,6 +635,7 @@ export class CollisionPipelineApp {
       candidateCount: broad.pairs.count,
       contactCount: narrow.contacts.length,
       falsePositiveCount: Math.max(0, broad.pairs.count - narrow.contacts.length),
+      tunnelingSaves: 0,
       impulsesApplied: response.impulsesApplied,
       auxiliaryChecks: broad.auxiliaryChecks,
       orderingSwaps: broad.orderingSwaps,
@@ -554,6 +652,8 @@ export class CollisionPipelineApp {
     this.broadResult = null;
     this.sweep.reset();
     this.comparisonSweep.reset();
+    this.versusSweepA.reset();
+    this.versusSweepB.reset();
     if (this.elements) {
       this.elements.stressButton.disabled = count >= MAX_BODY_COUNT;
     }
@@ -671,15 +771,295 @@ export class CollisionPipelineApp {
     }
   }
 
+  /** Draws the same live bodies through two independently chosen broad phases so their candidate sets can be compared. */
+  private renderVersus(): void {
+    if (!this.versusActive) {
+      return;
+    }
+    if (this.versusContextA) {
+      this.renderVersusPanel(this.versusContextA, this.versusMethodA, this.versusSweepA, this.elements.versusStatsA);
+    }
+    if (this.versusContextB) {
+      this.renderVersusPanel(this.versusContextB, this.versusMethodB, this.versusSweepB, this.elements.versusStatsB);
+    }
+  }
+
+  private renderVersusPanel(
+    context: CanvasRenderingContext2D,
+    method: BroadPhaseMethod,
+    sweep: SweepAndPrune,
+    statsElement: HTMLElement,
+  ): void {
+    const result = method === 'naive'
+      ? runNaiveBroadPhase(this.bodies)
+      : method === 'spatial'
+        ? runSpatialHashBroadPhase(this.bodies, this.cellSize)
+        : sweep.run(this.bodies);
+    const midnight = this.theme === 'midnight';
+    const scale = context.canvas.width / WORLD_BOUNDS.width;
+
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.fillStyle = midnight ? '#09171c' : '#f5f3ed';
+    context.fillRect(0, 0, context.canvas.width, context.canvas.height);
+    context.setTransform(scale, 0, 0, scale, 0, 0);
+
+    // Candidate webbing over identical bodies makes each method's filter strength directly comparable.
+    const lineLimit = 1800;
+    if (result.pairs.count <= lineLimit) {
+      context.strokeStyle = midnight ? 'rgba(240, 143, 97, 0.3)' : 'rgba(184, 75, 33, 0.28)';
+      context.lineWidth = 0.6 / scale;
+      context.beginPath();
+      for (let index = 0; index < result.pairs.count; index += 1) {
+        const first = this.bodies[result.pairs.getFirst(index)];
+        const second = this.bodies[result.pairs.getSecond(index)];
+        context.moveTo(first.x, first.y);
+        context.lineTo(second.x, second.y);
+      }
+      context.stroke();
+    }
+
+    const colors = midnight
+      ? ['#73d1c5', '#91b8f3', '#9be0a8']
+      : ['#147f85', '#456ca8', '#3f8a58'];
+    for (const body of this.bodies) {
+      context.fillStyle = body.contactFrames > 0
+        ? midnight ? '#f08f61' : '#b84b21'
+        : colors[body.colorIndex];
+      context.beginPath();
+      context.arc(body.x, body.y, Math.max(body.radius, 1.6), 0, Math.PI * 2);
+      context.fill();
+    }
+
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    statsElement.textContent =
+      `${result.pairs.count.toLocaleString()} cand · ${result.auxiliaryChecks.toLocaleString()} checks · ${this.formatDuration(result.duration)} ms`;
+  }
+
+  private clearVersusPanels(): void {
+    for (const context of [this.versusContextA, this.versusContextB]) {
+      if (!context) {
+        continue;
+      }
+      context.setTransform(1, 0, 0, 1, 0, 0);
+      context.fillStyle = this.theme === 'midnight' ? '#09171c' : '#f5f3ed';
+      context.fillRect(0, 0, context.canvas.width, context.canvas.height);
+    }
+    this.elements.versusStatsA.textContent = 'paused';
+    this.elements.versusStatsB.textContent = 'paused';
+  }
+
+  private syncVersusLabels(): void {
+    this.elements.versusNameA.textContent = this.methodLabel(this.versusMethodA);
+    this.elements.versusNameB.textContent = this.methodLabel(this.versusMethodB);
+    this.elements.versusSelectA.value = this.versusMethodA;
+    this.elements.versusSelectB.value = this.versusMethodB;
+  }
+
+  private methodLabel(method: BroadPhaseMethod): string {
+    return method === 'naive' ? 'Brute force' : method === 'spatial' ? 'Spatial hash' : 'Sweep and prune';
+  }
+
+  private scenarioLabel(): string {
+    const labels: Record<ScenarioName, string> = {
+      uniform: 'uniform',
+      clusters: 'dense clusters',
+      horizontal: 'horizontal lanes',
+      mixed: 'mixed sizes',
+      giant: 'giant bodies',
+    };
+    return labels[this.scenario];
+  }
+
+  private async runScaling(): Promise<void> {
+    this.elements.scalingButton.disabled = true;
+    this.elements.scalingStatus.textContent = 'Measuring each method across growing body counts...';
+    // Yield so the disabled state and status text paint before the synchronous measurement loop runs.
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 20));
+
+    this.scaling = this.measureScaling();
+    this.elements.scalingButton.disabled = false;
+
+    const naive = this.scaling.find((series) => series.method === 'naive');
+    const peak = naive ? naive.points[naive.points.length - 1] : null;
+    this.elements.scalingStatus.textContent = peak
+      ? `Brute force hit ${peak.duration.toFixed(2)} ms at ${peak.count.toLocaleString()} bodies on the ${this.scenarioLabel()} scenario.`
+      : `Measured on the ${this.scenarioLabel()} scenario.`;
+    this.renderScalingChart();
+  }
+
+  private resetScaling(): void {
+    this.scaling = null;
+    this.elements.scalingStatus.textContent = 'Plot broad-phase time against body count from 100 to 2,000.';
+    this.renderScalingChart();
+  }
+
+  /**
+   * Measures broad-phase cost at increasing body counts on fresh snapshots of the active scenario. Each point is the
+   * fastest of several runs to suppress GC and scheduler jitter; sweep-and-prune is warmed first so it is measured in
+   * its steady, temporally coherent state rather than its cold-start sort.
+   */
+  private measureScaling(): ScalingSeries[] {
+    const runs = 4;
+    const methods: BroadPhaseMethod[] = ['naive', 'spatial', 'sweep'];
+    const series: ScalingSeries[] = methods.map((method) => ({ method, points: [] }));
+
+    for (const count of SCALING_COUNTS) {
+      const bodies = createBodies(count, this.scenario);
+      for (const entry of series) {
+        let best = Number.POSITIVE_INFINITY;
+        if (entry.method === 'sweep') {
+          const sweep = new SweepAndPrune();
+          sweep.run(bodies);
+          for (let run = 0; run < runs; run += 1) {
+            best = Math.min(best, sweep.run(bodies).duration);
+          }
+        } else {
+          for (let run = 0; run < runs; run += 1) {
+            const result = entry.method === 'naive'
+              ? runNaiveBroadPhase(bodies)
+              : runSpatialHashBroadPhase(bodies, this.cellSize);
+            best = Math.min(best, result.duration);
+          }
+        }
+        entry.points.push({ count, duration: best });
+      }
+    }
+
+    return series;
+  }
+
+  private renderScalingChart(): void {
+    const context = this.scalingContext;
+    if (!context) {
+      return;
+    }
+    const midnight = this.theme === 'midnight';
+    const width = context.canvas.width;
+    const height = context.canvas.height;
+    const padLeft = 56;
+    const padRight = 18;
+    const padTop = 18;
+    const padBottom = 40;
+    const plotWidth = width - padLeft - padRight;
+    const plotHeight = height - padTop - padBottom;
+
+    const textColor = midnight ? '#91a5a7' : '#657075';
+    const axisColor = midnight ? 'rgba(145, 184, 243, 0.28)' : 'rgba(20, 40, 46, 0.22)';
+    const gridColor = midnight ? 'rgba(145, 184, 243, 0.08)' : 'rgba(20, 40, 46, 0.07)';
+
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.fillStyle = midnight ? '#0d1b20' : '#faf9f5';
+    context.fillRect(0, 0, width, height);
+
+    const xMax = SCALING_COUNTS[SCALING_COUNTS.length - 1];
+    let yMax = 0.01;
+    if (this.scaling) {
+      for (const series of this.scaling) {
+        for (const point of series.points) {
+          yMax = Math.max(yMax, point.duration);
+        }
+      }
+    }
+    yMax = niceCeil(yMax);
+
+    const xOf = (count: number): number => padLeft + (count / xMax) * plotWidth;
+    const yOf = (ms: number): number => padTop + plotHeight - (ms / yMax) * plotHeight;
+
+    context.font = '10px "DM Mono", monospace';
+    context.textBaseline = 'middle';
+    context.textAlign = 'right';
+    const yTicks = 5;
+    for (let tick = 0; tick <= yTicks; tick += 1) {
+      const value = (yMax / yTicks) * tick;
+      const y = yOf(value);
+      context.strokeStyle = gridColor;
+      context.lineWidth = 1;
+      context.beginPath();
+      context.moveTo(padLeft, y + 0.5);
+      context.lineTo(width - padRight, y + 0.5);
+      context.stroke();
+      context.fillStyle = textColor;
+      context.fillText(value.toFixed(value < 1 ? 2 : value < 10 ? 1 : 0), padLeft - 9, y);
+    }
+
+    context.textAlign = 'center';
+    context.textBaseline = 'top';
+    for (const count of SCALING_COUNTS) {
+      context.fillStyle = textColor;
+      context.fillText(count.toLocaleString(), xOf(count), height - padBottom + 9);
+    }
+
+    context.strokeStyle = axisColor;
+    context.lineWidth = 1;
+    context.beginPath();
+    context.moveTo(padLeft + 0.5, padTop);
+    context.lineTo(padLeft + 0.5, padTop + plotHeight);
+    context.lineTo(width - padRight, padTop + plotHeight);
+    context.stroke();
+
+    context.fillStyle = textColor;
+    context.textAlign = 'center';
+    context.textBaseline = 'alphabetic';
+    context.fillText('Body count', padLeft + plotWidth / 2, height - 8);
+    context.save();
+    context.translate(15, padTop + plotHeight / 2);
+    context.rotate(-Math.PI / 2);
+    context.fillText('Broad-phase ms', 0, 0);
+    context.restore();
+
+    if (!this.scaling) {
+      context.fillStyle = textColor;
+      context.textAlign = 'center';
+      context.textBaseline = 'middle';
+      context.fillText('Run "Measure scaling" to plot each method.', padLeft + plotWidth / 2, padTop + plotHeight / 2);
+      return;
+    }
+
+    const colors: Record<BroadPhaseMethod, string> = {
+      naive: midnight ? '#f08f61' : '#b84b21',
+      spatial: midnight ? '#73d1c5' : '#147f85',
+      sweep: midnight ? '#91b8f3' : '#456ca8',
+    };
+    for (const series of this.scaling) {
+      context.strokeStyle = colors[series.method];
+      context.lineWidth = 2;
+      context.beginPath();
+      series.points.forEach((point, index) => {
+        const x = xOf(point.count);
+        const y = yOf(point.duration);
+        if (index === 0) {
+          context.moveTo(x, y);
+        } else {
+          context.lineTo(x, y);
+        }
+      });
+      context.stroke();
+      context.fillStyle = colors[series.method];
+      for (const point of series.points) {
+        context.beginPath();
+        context.arc(xOf(point.count), yOf(point.duration), 3, 0, Math.PI * 2);
+        context.fill();
+      }
+    }
+  }
+
   private updatePipelineTelemetry(): void {
     const theoretical = (this.bodies.length * (this.bodies.length - 1)) / 2;
     const rejected = theoretical === 0
       ? 0
       : (1 - this.stats.candidateCount / theoretical) * 100;
+    const falsePositiveRate = this.stats.candidateCount === 0
+      ? 0
+      : (this.stats.falsePositiveCount / this.stats.candidateCount) * 100;
     this.elements.theoreticalPairs.textContent = theoretical.toLocaleString();
     this.elements.candidateCount.textContent = this.stats.candidateCount.toLocaleString();
     this.elements.contactCount.textContent = this.stats.contactCount.toLocaleString();
     this.elements.falsePositiveCount.textContent = this.stats.falsePositiveCount.toLocaleString();
+    this.elements.falsePositiveRate.textContent = `${falsePositiveRate.toFixed(1)}%`;
+    this.elements.tunnelingSaves.textContent = this.ccd
+      ? this.stats.tunnelingSaves.toLocaleString()
+      : '—';
+    this.elements.tunnelingSaves.classList.toggle('telemetry-pass', this.ccd && this.stats.tunnelingSaves > 0);
     this.elements.rejectionRate.textContent = `${Math.max(0, rejected).toFixed(1)}%`;
     this.elements.broadTime.textContent = this.formatDuration(this.stats.broadDuration);
     this.elements.narrowTime.textContent = this.formatDuration(this.stats.narrowDuration);
@@ -728,6 +1108,10 @@ export class CollisionPipelineApp {
       this.elements.canvasRecall.textContent = 'Not audited';
       this.elements.canvasRecallLabel.textContent = 'Snapshot recall';
       this.elements.canvasRecall.parentElement?.classList.remove('canvas-recall--pass', 'canvas-recall--fail');
+      this.elements.stageRecall.textContent = '—';
+      this.elements.stageMissed.textContent = '—';
+      this.elements.stageRecall.classList.remove('telemetry-failure', 'telemetry-pass');
+      this.elements.stageMissed.classList.remove('telemetry-failure');
       return;
     }
 
@@ -747,6 +1131,11 @@ export class CollisionPipelineApp {
       : 'Snapshot recall';
     this.elements.canvasRecall.parentElement?.classList.toggle('canvas-recall--pass', !failed);
     this.elements.canvasRecall.parentElement?.classList.toggle('canvas-recall--fail', failed);
+    this.elements.stageRecall.textContent = `${this.audit.recall.toFixed(1)}%`;
+    this.elements.stageMissed.textContent = this.audit.missedContacts.toLocaleString();
+    this.elements.stageRecall.classList.toggle('telemetry-failure', failed);
+    this.elements.stageRecall.classList.toggle('telemetry-pass', !failed);
+    this.elements.stageMissed.classList.toggle('telemetry-failure', failed);
   }
 
   private updateComparisonTelemetry(): void {
@@ -890,6 +1279,7 @@ export class CollisionPipelineApp {
     this.elements.scenarioSelect.value = this.scenario;
     this.elements.pauseToggle.checked = this.isPaused;
     this.elements.responseToggle.checked = this.resolveResponse;
+    this.elements.ccdToggle.checked = this.ccd;
     this.elements.pairsToggle.checked = this.showPairs;
     this.elements.contactsToggle.checked = this.showContacts;
     this.elements.trailsToggle.checked = this.showTrails;
@@ -932,6 +1322,7 @@ export class CollisionPipelineApp {
       auditButton: this.getElement<HTMLButtonElement>('#run-audit'),
       pauseToggle: this.getElement<HTMLInputElement>('#pause-sim'),
       responseToggle: this.getElement<HTMLInputElement>('#resolve-response'),
+      ccdToggle: this.getElement<HTMLInputElement>('#resolve-ccd'),
       pairsToggle: this.getElement<HTMLInputElement>('#show-pairs'),
       contactsToggle: this.getElement<HTMLInputElement>('#show-contacts'),
       trailsToggle: this.getElement<HTMLInputElement>('#show-trails'),
@@ -958,6 +1349,10 @@ export class CollisionPipelineApp {
       canvasRecall: this.getElement<HTMLElement>('#canvas-recall'),
       canvasRecallLabel: this.getElement<HTMLElement>('#canvas-recall-label'),
       falsePositiveCount: this.getElement<HTMLElement>('#false-positive-count'),
+      falsePositiveRate: this.getElement<HTMLElement>('#false-positive-rate'),
+      tunnelingSaves: this.getElement<HTMLElement>('#tunneling-saves'),
+      stageRecall: this.getElement<HTMLElement>('#stage-recall'),
+      stageMissed: this.getElement<HTMLElement>('#stage-missed'),
       rejectionRate: this.getElement<HTMLElement>('#rejection-rate'),
       broadTime: this.getElement<HTMLElement>('#broad-time'),
       narrowTime: this.getElement<HTMLElement>('#narrow-time'),
@@ -987,6 +1382,18 @@ export class CollisionPipelineApp {
       comparisonSweepTime: this.getElement<HTMLElement>('#comparison-sweep-time'),
       comparisonSweepCandidates: this.getElement<HTMLElement>('#comparison-sweep-candidates'),
       comparisonSweepRecall: this.getElement<HTMLElement>('#comparison-sweep-recall'),
+      versusActiveToggle: this.getElement<HTMLInputElement>('#versus-active'),
+      versusSelectA: this.getElement<HTMLSelectElement>('#versus-a'),
+      versusSelectB: this.getElement<HTMLSelectElement>('#versus-b'),
+      versusCanvasA: this.getElement<HTMLCanvasElement>('#versus-canvas-a'),
+      versusCanvasB: this.getElement<HTMLCanvasElement>('#versus-canvas-b'),
+      versusNameA: this.getElement<HTMLElement>('#versus-a-name'),
+      versusNameB: this.getElement<HTMLElement>('#versus-b-name'),
+      versusStatsA: this.getElement<HTMLElement>('#versus-a-stats'),
+      versusStatsB: this.getElement<HTMLElement>('#versus-b-stats'),
+      scalingButton: this.getElement<HTMLButtonElement>('#run-scaling'),
+      scalingStatus: this.getElement<HTMLElement>('#scaling-status'),
+      scalingCanvas: this.getElement<HTMLCanvasElement>('#scaling-canvas'),
     };
   }
 
@@ -1113,24 +1520,37 @@ export class CollisionPipelineApp {
 
             <section class="panel">
               <div class="panel__header"><div><div class="panel__kicker">Pipeline cost</div><h3>Measured stages</h3></div></div>
-              <dl class="stats-grid stats-grid--accent">
-                <dt>Broad phase</dt><dd><span id="broad-time">0.00</span> ms</dd>
-                <dt>Narrow phase</dt><dd><span id="narrow-time">0.00</span> ms</dd>
-                <dt>Response</dt><dd><span id="response-time">0.00</span> ms</dd>
-                <dt>False positives</dt><dd id="false-positive-count">0</dd>
-                <dt>Pairs rejected</dt><dd id="rejection-rate">0.0%</dd>
-                <dt>Broad pair checks</dt><dd id="auxiliary-checks">0</dd>
-                <dt>Sweep order swaps</dt><dd id="ordering-swaps">—</dd>
-                <dt>Hash cell entries</dt><dd id="bucket-entries">—</dd>
-                <dt>Hash buckets</dt><dd id="bucket-count">0</dd>
-                <dt>Max bucket</dt><dd id="max-bucket-size">0</dd>
-              </dl>
+              <div class="metric-group">
+                <div class="metric-group__label"><span class="metric-group__dot metric-group__dot--correct"></span>Correctness · is the contract upheld?</div>
+                <dl class="stats-grid">
+                  <dt>Contact recall</dt><dd id="stage-recall">—</dd>
+                  <dt>Missed contacts</dt><dd id="stage-missed">—</dd>
+                  <dt>False positives</dt><dd id="false-positive-count">0</dd>
+                  <dt>False-positive rate</dt><dd id="false-positive-rate">0.0%</dd>
+                  <dt>Tunneling saves</dt><dd id="tunneling-saves">—</dd>
+                </dl>
+              </div>
+              <div class="metric-group">
+                <div class="metric-group__label"><span class="metric-group__dot metric-group__dot--perf"></span>Performance · what does it cost?</div>
+                <dl class="stats-grid">
+                  <dt>Broad phase</dt><dd><span id="broad-time">0.00</span> ms</dd>
+                  <dt>Narrow phase</dt><dd><span id="narrow-time">0.00</span> ms</dd>
+                  <dt>Response</dt><dd><span id="response-time">0.00</span> ms</dd>
+                  <dt>Pairs rejected</dt><dd id="rejection-rate">0.0%</dd>
+                  <dt>Broad pair checks</dt><dd id="auxiliary-checks">0</dd>
+                  <dt>Sweep order swaps</dt><dd id="ordering-swaps">—</dd>
+                  <dt>Hash cell entries</dt><dd id="bucket-entries">—</dd>
+                  <dt>Hash buckets</dt><dd id="bucket-count">0</dd>
+                  <dt>Max bucket</dt><dd id="max-bucket-size">0</dd>
+                </dl>
+              </div>
             </section>
 
             <section class="panel">
               <div class="panel__header"><div><div class="panel__kicker">Inspect</div><h3>Debug and response</h3></div></div>
               <div class="toggle-stack">
                 <label class="toggle"><span><b>Resolve contacts</b><small>Apply correction and impulses</small></span><span class="switch"><input id="resolve-response" type="checkbox" checked /><i></i></span></label>
+                <label class="toggle"><span><b>Continuous (CCD)</b><small>Swept test stops fast bodies tunneling</small></span><span class="switch"><input id="resolve-ccd" type="checkbox" /><i></i></span></label>
                 <label class="toggle"><span><b>Candidate lines</b><small>Shown when candidate count is manageable</small></span><span class="switch"><input id="show-pairs" type="checkbox" /><i></i></span></label>
                 <label class="toggle"><span><b>Contact normals</b><small>Exact narrow-phase result</small></span><span class="switch"><input id="show-contacts" type="checkbox" checked /><i></i></span></label>
                 <label class="toggle"><span><b>Motion ticks</b><small>Short per-frame trails without accumulation</small></span><span class="switch"><input id="show-trails" type="checkbox" checked /><i></i></span></label>
@@ -1167,6 +1587,48 @@ export class CollisionPipelineApp {
             <article><div><span>Brute force</span><b>Every theoretical pair</b></div><strong id="comparison-naive-time">—</strong><small id="comparison-naive-candidates">—</small><em id="comparison-naive-recall">—</em></article>
             <article class="comparison__featured"><div><span>Spatial hash</span><b>Tunable fixed grid</b></div><strong id="comparison-spatial-time">—</strong><small id="comparison-spatial-candidates">—</small><em id="comparison-spatial-recall">—</em></article>
             <article><div><span>Sweep and prune</span><b>Coherent intervals</b></div><strong id="comparison-sweep-time">—</strong><small id="comparison-sweep-candidates">—</small><em id="comparison-sweep-recall">—</em></article>
+          </div>
+        </section>
+
+        <section class="scaling">
+          <div class="scaling__intro">
+            <div class="eyebrow">Scaling behavior</div>
+            <h2>Quadratic shows its shape.</h2>
+            <p>Measure broad-phase cost across growing body counts on fresh snapshots of the current scenario. Brute force traces an n² curve while the partitioned methods stay far flatter.</p>
+            <div class="scaling__legend">
+              <span class="legend-chip legend-chip--naive">Brute force</span>
+              <span class="legend-chip legend-chip--spatial">Spatial hash</span>
+              <span class="legend-chip legend-chip--sweep">Sweep and prune</span>
+            </div>
+            <p id="scaling-status" class="scaling-status">Plot broad-phase time against body count from 100 to 2,000.</p>
+            <button class="button button--primary" id="run-scaling" type="button">Measure scaling</button>
+          </div>
+          <div class="scaling__chart">
+            <canvas id="scaling-canvas" width="760" height="360" aria-label="Broad-phase duration versus body count"></canvas>
+          </div>
+        </section>
+
+        <section class="versus">
+          <div class="versus__intro">
+            <div class="eyebrow">Side-by-side</div>
+            <h2>Same frame, two strategies.</h2>
+            <p>Both panels animate the identical live simulation. Watch the chosen broad phases propose different candidate sets from exactly the same bodies, frame after frame.</p>
+            <div class="versus__controls">
+              <label class="select-inline"><span>Left</span><select id="versus-a"><option value="naive">Brute force</option><option value="spatial" selected>Spatial hash</option><option value="sweep">Sweep and prune</option></select></label>
+              <label class="select-inline"><span>Right</span><select id="versus-b"><option value="naive">Brute force</option><option value="spatial">Spatial hash</option><option value="sweep" selected>Sweep and prune</option></select></label>
+              <label class="toggle toggle--inline"><span><b>Animate</b><small>Runs two extra broad phases each frame</small></span><span class="switch"><input id="versus-active" type="checkbox" checked /><i></i></span></label>
+            </div>
+            <p class="versus-note">Candidate lines are drawn over identical bodies, so denser webbing means more pairs survived that method's filter.</p>
+          </div>
+          <div class="versus__stage">
+            <figure class="versus__panel">
+              <div class="versus__tag versus__tag--a"><span id="versus-a-name">Spatial hash</span><b id="versus-a-stats">—</b></div>
+              <canvas id="versus-canvas-a" width="480" height="300" aria-label="Left broad-phase comparison"></canvas>
+            </figure>
+            <figure class="versus__panel">
+              <div class="versus__tag versus__tag--b"><span id="versus-b-name">Sweep and prune</span><b id="versus-b-stats">—</b></div>
+              <canvas id="versus-canvas-b" width="480" height="300" aria-label="Right broad-phase comparison"></canvas>
+            </figure>
           </div>
         </section>
 

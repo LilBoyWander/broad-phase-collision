@@ -9,7 +9,11 @@ const pairs = new PairBuffer();
  * This keeps the method correct for mixed body sizes. The pair set removes duplicates created when two bodies share
  * more than one cell; giant bodies make that bookkeeping cost visible, which is one of this case study's key lessons.
  */
-export function runSpatialHashBroadPhase(bodies: Body[], cellSize: number): BroadPhaseResult {
+export function runSpatialHashBroadPhase(
+  bodies: Body[],
+  cellSize: number,
+  swept = false,
+): BroadPhaseResult {
   const startedAt = performance.now();
   const buckets = new Map<number, number[]>();
   const columns = Math.ceil(960 / cellSize) + 2;
@@ -18,10 +22,15 @@ export function runSpatialHashBroadPhase(bodies: Body[], cellSize: number): Broa
 
   for (let index = 0; index < bodies.length; index += 1) {
     const body = bodies[index];
-    const minColumn = Math.floor((body.x - body.radius) / cellSize);
-    const maxColumn = Math.floor((body.x + body.radius) / cellSize);
-    const minRow = Math.floor((body.y - body.radius) / cellSize);
-    const maxRow = Math.floor((body.y + body.radius) / cellSize);
+    // With continuous detection the AABB spans the whole frame's motion, so fast bodies still share cells.
+    const lowX = swept ? Math.min(body.x, body.previousX) : body.x;
+    const highX = swept ? Math.max(body.x, body.previousX) : body.x;
+    const lowY = swept ? Math.min(body.y, body.previousY) : body.y;
+    const highY = swept ? Math.max(body.y, body.previousY) : body.y;
+    const minColumn = Math.floor((lowX - body.radius) / cellSize);
+    const maxColumn = Math.floor((highX + body.radius) / cellSize);
+    const minRow = Math.floor((lowY - body.radius) / cellSize);
+    const maxRow = Math.floor((highY + body.radius) / cellSize);
 
     for (let row = minRow; row <= maxRow; row += 1) {
       for (let column = minColumn; column <= maxColumn; column += 1) {

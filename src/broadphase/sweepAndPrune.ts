@@ -17,9 +17,9 @@ export class SweepAndPrune {
   private readonly intervals: Interval[] = [];
   private readonly pairs = new PairBuffer();
 
-  run(bodies: Body[]): BroadPhaseResult {
+  run(bodies: Body[], swept = false): BroadPhaseResult {
     const startedAt = performance.now();
-    const usedFullSort = this.syncIntervals(bodies);
+    const usedFullSort = this.syncIntervals(bodies, swept);
     this.pairs.clear();
 
     let swaps = 0;
@@ -50,10 +50,12 @@ export class SweepAndPrune {
 
         overlapChecks += 1;
         const secondBody = bodies[secondInterval.bodyIndex];
-        if (
-          firstBody.y + firstBody.radius >= secondBody.y - secondBody.radius &&
-          firstBody.y - firstBody.radius <= secondBody.y + secondBody.radius
-        ) {
+        // Swept mode widens the Y test to the body's full vertical travel so fast crossings are not pruned.
+        const firstLowY = (swept ? Math.min(firstBody.y, firstBody.previousY) : firstBody.y) - firstBody.radius;
+        const firstHighY = (swept ? Math.max(firstBody.y, firstBody.previousY) : firstBody.y) + firstBody.radius;
+        const secondLowY = (swept ? Math.min(secondBody.y, secondBody.previousY) : secondBody.y) - secondBody.radius;
+        const secondHighY = (swept ? Math.max(secondBody.y, secondBody.previousY) : secondBody.y) + secondBody.radius;
+        if (firstHighY >= secondLowY && firstLowY <= secondHighY) {
           this.pairs.push(
             Math.min(firstInterval.bodyIndex, secondInterval.bodyIndex),
             Math.max(firstInterval.bodyIndex, secondInterval.bodyIndex),
@@ -78,14 +80,15 @@ export class SweepAndPrune {
     this.intervals.length = 0;
   }
 
-  private syncIntervals(bodies: Body[]): boolean {
+  private syncIntervals(bodies: Body[], swept: boolean): boolean {
     if (this.intervals.length !== bodies.length) {
       this.intervals.length = 0;
       for (let index = 0; index < bodies.length; index += 1) {
+        const body = bodies[index];
         this.intervals.push({
           bodyIndex: index,
-          min: bodies[index].x - bodies[index].radius,
-          max: bodies[index].x + bodies[index].radius,
+          min: (swept ? Math.min(body.x, body.previousX) : body.x) - body.radius,
+          max: (swept ? Math.max(body.x, body.previousX) : body.x) + body.radius,
         });
       }
       this.intervals.sort((first, second) => first.min - second.min);
@@ -94,8 +97,8 @@ export class SweepAndPrune {
 
     for (const interval of this.intervals) {
       const body = bodies[interval.bodyIndex];
-      interval.min = body.x - body.radius;
-      interval.max = body.x + body.radius;
+      interval.min = (swept ? Math.min(body.x, body.previousX) : body.x) - body.radius;
+      interval.max = (swept ? Math.max(body.x, body.previousX) : body.x) + body.radius;
     }
     return false;
   }

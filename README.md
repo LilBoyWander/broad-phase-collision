@@ -87,15 +87,49 @@ Type-check without emitting files:
 npm run check
 ```
 
+Run the test suite:
+
+```bash
+npm test
+```
+
+## Tests
+
+The case study claims audited correctness, so that claim is itself tested. [Vitest](https://vitest.dev/) covers the pieces the demo measures:
+
+- `pairBuffer` — flat storage growth and integrity across reallocation.
+- `naive` — emits exactly `n(n - 1) / 2` unique ascending pairs.
+- `spatialHash` / `sweepAndPrune` — recall against the oracle, deduplication, multi-cell insertion, and sweep temporal coherence (cold full sort once, then insertion-sort repair).
+- `collision` — exact circle tests, touching-but-not-overlapping boundaries, impulse direction, and momentum conservation.
+- `continuous` — swept time-of-impact roots and tunneling clamp.
+- `world` — deterministic seeded scenarios and wall reflection.
+- `recall.invariant` — **the central contract**: every broad phase keeps 100% recall against the brute-force oracle across every scenario, body count, and many simulated frames.
+- `app.mount` — mounts against a stubbed canvas and drives one frame, guarding the wiring between markup and code.
+
 ## Controls
 
 - Change body count, motion speed, restitution, scenario, and spatial-hash cell size.
 - Switch methods with the UI or keys `1`, `2`, and `3`.
 - Press `Space` to pause the simulation.
-- Toggle candidate lines, exact contact normals, short motion ticks, response, and the spatial grid.
+- Toggle candidate lines, exact contact normals, short motion ticks, response, continuous detection, and the spatial grid.
 - Add 250 bodies at a time with the stress control, up to 2,000.
 
 Candidate lines are intentionally hidden when their count becomes too large to remain useful.
+
+## Reading The Results
+
+Three views turn the raw counters into lessons:
+
+- **Measured stages** splits telemetry into a *Correctness* group (recall, missed contacts, false positives and rate, tunneling saves) and a *Performance* group (stage timings and method-specific work), so quality and cost never get confused.
+- **Scaling behavior** plots broad-phase time against body count from 100 to 2,000 on fresh snapshots of the current scenario. Brute force traces an n² curve while the partitioned methods stay far flatter.
+- **Side-by-side** animates the live simulation through two chosen broad phases at once. The candidate webbing is drawn over identical bodies, so denser lines mean more pairs survived that method's filter.
+
+## Continuous Detection (CCD)
+
+Discrete detection inspects only the current frame, so a body moving more than its own radius per frame can pass through another between samples. Enabling **Continuous (CCD)** addresses both halves of that failure:
+
+- Broad phase inflates each body's AABB to span its full frame of motion, so a fast pair is still proposed instead of being pruned.
+- A swept circle-circle test solves for the earliest time of impact in the frame; tunneling pairs are clamped back to that instant and handed to the same impulse solver. The *Tunneling saves* metric counts how many crossings this caught that discrete testing would have missed.
 
 ## Implementation Notes
 
@@ -120,12 +154,18 @@ src/
 │   └── sweepAndPrune.ts
 ├── physics/
 │   ├── collision.ts
+│   ├── continuous.ts        # swept time-of-impact for CCD
 │   ├── types.ts
 │   └── world.ts
+├── test/
+│   ├── oracle.ts            # shared recall/correctness helpers
+│   └── recall.invariant.test.ts
 ├── app.ts
 ├── main.ts
 └── style.css
 ```
+
+Unit tests live next to the code they cover as `*.test.ts`, with cross-cutting suites under `src/test/`.
 
 ## Deployment
 
@@ -143,9 +183,9 @@ No server process or start command is required for the production deployment.
 
 ## Scope And Limitations
 
-This study intentionally uses circles, discrete collision detection, a single response pass, and one-axis sweep-and-prune. Collision tests only inspect positions in the current frame; they do not use swept AABBs or time-of-impact tests, so sufficiently fast bodies can tunnel through one another between frames. The recall audit verifies current-frame overlaps only.
+This study uses circles, a single response pass, and one-axis sweep-and-prune. Detection is discrete by default — collision tests inspect only current-frame positions — so sufficiently fast bodies can tunnel between frames. The optional continuous mode adds swept broad-phase bounds and a time-of-impact narrow test to close that gap; the recall audit still verifies current-frame overlaps only.
 
-A production physics engine may add shape-specific narrow phases, continuous collision detection, persistent manifolds, sleeping, solver iterations, and adaptive broad-phase structures.
+A production physics engine would go further: shape-specific narrow phases beyond circles, more complete continuous detection with sub-stepping, persistent manifolds, sleeping, solver iterations, and adaptive broad-phase structures. Supporting rectangles and other shapes is the most natural next step, since broad-phase behavior shifts once bounds are no longer derived from a single radius.
 
 Those omissions keep this case study focused on the contract and tradeoffs of broad-phase candidate generation.
 
