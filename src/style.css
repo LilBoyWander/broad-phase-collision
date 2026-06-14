@@ -634,6 +634,20 @@ kbd {
   padding: 0 16px;
 }
 
+.scope-note {
+  margin: 0 16px 16px;
+  padding: 10px 11px;
+  border-left: 3px solid var(--orange);
+  background: var(--orange-soft);
+  color: var(--ink-soft);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.scope-note b {
+  color: var(--orange);
+}
+
 .range-row,
 .select-row,
 .toggle {
@@ -842,6 +856,16 @@ select {
   font-size: clamp(26px, 4vw, 50px);
 }
 
+.telemetry-failure {
+  color: #e04f4f !important;
+}
+
+.audit__intro .telemetry-failure {
+  padding-left: 10px;
+  border-left: 3px solid #e04f4f;
+  font-weight: 700;
+}
+
 .comparison__cards {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -895,6 +919,13 @@ select {
   margin-top: 5px;
   color: var(--orange);
   font-family: 'DM Mono', monospace;
+}
+
+.comparison-note {
+  padding: 10px 11px;
+  border-left: 3px solid var(--teal);
+  background: var(--teal-soft);
+  font-size: 10px;
 }
 
 .comparison__featured {

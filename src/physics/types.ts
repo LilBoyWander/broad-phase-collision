@@ -27,6 +27,7 @@ export interface BroadPhaseResult {
   pairs: PairBuffer;
   duration: number;
   auxiliaryChecks: number;
+  orderingSwaps: number;
   bucketCount: number;
   maxBucketSize: number;
 }

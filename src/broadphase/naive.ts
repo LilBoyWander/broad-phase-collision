@@ -20,6 +20,7 @@ export function runNaiveBroadPhase(bodies: Body[]): BroadPhaseResult {
     pairs,
     duration: performance.now() - startedAt,
     auxiliaryChecks: pairs.count,
+    orderingSwaps: 0,
     bucketCount: 0,
     maxBucketSize: 0,
   };

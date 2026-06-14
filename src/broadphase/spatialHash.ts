@@ -61,6 +61,7 @@ export function runSpatialHashBroadPhase(bodies: Body[], cellSize: number): Broa
     pairs,
     duration: performance.now() - startedAt,
     auxiliaryChecks,
+    orderingSwaps: 0,
     bucketCount: buckets.size,
     maxBucketSize,
   };

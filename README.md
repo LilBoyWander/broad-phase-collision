@@ -29,8 +29,6 @@ The broad phase reduces that search space. It may return false positives, but it
 | Response | Correct penetration and apply restitution impulses | Applied impulses, duration |
 | Audit | Compare broad-phase output with brute-force truth | Contact recall, missed contacts |
 
-The original single-file experiments are preserved in [`prototype/`](./prototype/).
-
 ## Broad-Phase Methods
 
 ### Brute Force
@@ -39,15 +37,17 @@ Emits every unique pair. It is simple, correct, and useful as the audit oracle, 
 
 ### Spatial Hash
 
-Inserts every circle into all fixed-grid cells touched by its axis-aligned bounding box. Shared-cell pairs are deduplicated before narrow-phase testing.
+Inserts every circle into all fixed-grid cells touched by its axis-aligned bounding box, not just the center cell. Shared-cell pairs are deduplicated before narrow-phase testing.
 
 This works especially well for similarly sized objects distributed across space. Dense buckets, poor cell sizing, and giant objects spanning many cells expose its limits.
 
 ### Sweep And Prune
 
-Sorts body intervals along the X axis and only considers overlapping projections. A Y-axis AABB test further reduces candidates before exact circle tests.
+This educational implementation uses one sorted axis: X. It only scans overlapping X projections, then applies a Y-axis AABB test before emitting candidates for exact circle tests.
 
-Interval order is retained between frames, allowing insertion sort to benefit from temporal coherence. Horizontal crowding weakens the chosen axis.
+Interval order is retained between live frames and repaired with insertion sort, allowing temporal coherence to reduce sorting work. A full sort occurs only when the interval set is initialized or reset. Horizontal crowding weakens the chosen axis.
+
+Candidate counts are not perfectly symmetric across methods. Spatial hash candidates are deduplicated pairs that shared at least one cell, while sweep-and-prune candidates have already passed both X and Y AABB overlap tests. The UI therefore reports broad pair checks separately from emitted candidates, and reports sweep ordering swaps separately. The same-snapshot benchmark includes sweep-and-prune's cold-start sort; live telemetry shows its warm-frame behavior.
 
 ## Scenario Matrix
 
@@ -96,6 +96,9 @@ Candidate lines are intentionally hidden when their count becomes too large to r
 - The simulation uses deterministic seeded scenarios for repeatable resets.
 - Candidate pairs live in reusable flat `Int32Array` storage to avoid allocating one object per pair.
 - Spatial hashing inserts full circle AABBs rather than only center points.
+- Shared-cell hash pairs are deduplicated before narrow-phase testing.
+- Sweep-and-prune preserves its previous X ordering and uses insertion sort on subsequent live frames.
+- The renderer clears the canvas every frame and uses body outlines rather than accumulated trails.
 - Position correction is weighted by inverse mass.
 - Restitution impulses are applied only when bodies are moving toward one another.
 - Audit work is measured separately and does not contaminate live pipeline timings.
@@ -116,9 +119,6 @@ src/
 ├── app.ts
 ├── main.ts
 └── style.css
-prototype/
-├── broad-phase-collision-v1.html
-└── broad-phase-collision-v2.html
 ```
 
 ## Deployment
@@ -137,7 +137,9 @@ No server process or start command is required for the production deployment.
 
 ## Scope And Limitations
 
-This study intentionally uses circles, discrete collision detection, a single response pass, and one-axis sweep-and-prune. A production physics engine may add shape-specific narrow phases, continuous collision detection, persistent manifolds, sleeping, solver iterations, and adaptive broad-phase structures.
+This study intentionally uses circles, discrete collision detection, a single response pass, and one-axis sweep-and-prune. Collision tests only inspect positions in the current frame; they do not use swept AABBs or time-of-impact tests, so sufficiently fast bodies can tunnel through one another between frames. The recall audit verifies current-frame overlaps only.
+
+A production physics engine may add shape-specific narrow phases, continuous collision detection, persistent manifolds, sleeping, solver iterations, and adaptive broad-phase structures.
 
 Those omissions keep this case study focused on the contract and tradeoffs of broad-phase candidate generation.
 

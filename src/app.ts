@@ -26,6 +26,7 @@ interface PipelineStats {
   falsePositiveCount: number;
   impulsesApplied: number;
   auxiliaryChecks: number;
+  orderingSwaps: number;
   bucketCount: number;
   maxBucketSize: number;
 }
@@ -44,6 +45,8 @@ interface MethodComparison {
   contacts: number;
   falsePositives: number;
   recall: number;
+  auxiliaryChecks: number;
+  orderingSwaps: number;
 }
 
 interface AppElements {
@@ -85,6 +88,7 @@ interface AppElements {
   narrowTime: HTMLElement;
   responseTime: HTMLElement;
   auxiliaryChecks: HTMLElement;
+  orderingSwaps: HTMLElement;
   bucketCount: HTMLElement;
   maxBucketSize: HTMLElement;
   auditStatus: HTMLElement;
@@ -154,6 +158,7 @@ export class CollisionPipelineApp {
     falsePositiveCount: 0,
     impulsesApplied: 0,
     auxiliaryChecks: 0,
+    orderingSwaps: 0,
     bucketCount: 0,
     maxBucketSize: 0,
   };
@@ -469,6 +474,8 @@ export class CollisionPipelineApp {
         contacts: contacts.contacts.length,
         falsePositives: result.pairs.count - contacts.contacts.length,
         recall: oracleContacts.size === 0 ? 100 : ((oracleContacts.size - missed) / oracleContacts.size) * 100,
+        auxiliaryChecks: result.auxiliaryChecks,
+        orderingSwaps: result.orderingSwaps,
       };
     });
 
@@ -492,6 +499,7 @@ export class CollisionPipelineApp {
       falsePositiveCount: Math.max(0, broad.pairs.count - narrow.contacts.length),
       impulsesApplied: response.impulsesApplied,
       auxiliaryChecks: broad.auxiliaryChecks,
+      orderingSwaps: broad.orderingSwaps,
       bucketCount: broad.bucketCount,
       maxBucketSize: broad.maxBucketSize,
     };
@@ -580,11 +588,11 @@ export class CollisionPipelineApp {
       context.beginPath();
       context.arc(body.x, body.y, body.radius, 0, Math.PI * 2);
       context.fill();
-      if (body.radius > 32) {
-        context.strokeStyle = midnight ? 'rgba(240, 143, 97, 0.7)' : 'rgba(184, 75, 33, 0.65)';
-        context.lineWidth = 2;
-        context.stroke();
-      }
+      context.strokeStyle = body.radius > 32
+        ? midnight ? 'rgba(240, 143, 97, 0.78)' : 'rgba(184, 75, 33, 0.72)'
+        : midnight ? 'rgba(3, 12, 16, 0.78)' : 'rgba(255, 255, 255, 0.82)';
+      context.lineWidth = body.radius > 32 ? 2 : 1;
+      context.stroke();
     }
 
     if (this.showContacts) {
@@ -620,6 +628,9 @@ export class CollisionPipelineApp {
     this.elements.narrowTime.textContent = this.stats.narrowDuration.toFixed(2);
     this.elements.responseTime.textContent = this.stats.responseDuration.toFixed(2);
     this.elements.auxiliaryChecks.textContent = this.stats.auxiliaryChecks.toLocaleString();
+    this.elements.orderingSwaps.textContent = this.method === 'sweep'
+      ? this.stats.orderingSwaps.toLocaleString()
+      : '—';
     this.elements.bucketCount.textContent = this.method === 'spatial'
       ? this.stats.bucketCount.toLocaleString()
       : '—';
@@ -647,14 +658,22 @@ export class CollisionPipelineApp {
       this.elements.auditRecall.textContent = '—';
       this.elements.auditMissed.textContent = '—';
       this.elements.auditOracle.textContent = '—';
+      this.elements.auditStatus.classList.remove('telemetry-failure');
+      this.elements.auditRecall.classList.remove('telemetry-failure');
+      this.elements.auditMissed.classList.remove('telemetry-failure');
       return;
     }
 
-    this.elements.auditStatus.textContent =
-      `Audited in ${this.audit.duration.toFixed(2)} ms without affecting pipeline timing.`;
+    const failed = this.audit.missedContacts > 0;
+    this.elements.auditStatus.textContent = failed
+      ? `Recall failure: ${this.audit.missedContacts.toLocaleString()} current-frame contact${this.audit.missedContacts === 1 ? '' : 's'} never reached the narrow phase.`
+      : `Audited in ${this.audit.duration.toFixed(2)} ms. No current-frame contacts were missed.`;
     this.elements.auditRecall.textContent = `${this.audit.recall.toFixed(1)}%`;
     this.elements.auditMissed.textContent = this.audit.missedContacts.toLocaleString();
     this.elements.auditOracle.textContent = this.audit.oracleContacts.toLocaleString();
+    this.elements.auditStatus.classList.toggle('telemetry-failure', failed);
+    this.elements.auditRecall.classList.toggle('telemetry-failure', failed);
+    this.elements.auditMissed.classList.toggle('telemetry-failure', failed);
   }
 
   private updateComparisonTelemetry(): void {
@@ -689,8 +708,13 @@ export class CollisionPipelineApp {
         return;
       }
       time.textContent = `${result.duration.toFixed(2)} ms`;
-      candidates.textContent = `${result.candidates.toLocaleString()} candidates`;
+      const swapDetail = method === 'sweep'
+        ? ` · ${result.orderingSwaps.toLocaleString()} order swaps`
+        : '';
+      candidates.textContent =
+        `${result.candidates.toLocaleString()} candidates · ${result.auxiliaryChecks.toLocaleString()} pair checks${swapDetail}`;
       recall.textContent = `${result.recall.toFixed(1)}% recall`;
+      recall.classList.toggle('telemetry-failure', result.recall < 100);
     };
     write(
       'naive',
@@ -739,7 +763,7 @@ export class CollisionPipelineApp {
       ? 'Every unique body pair advances to the exact circle test. Correct, simple, and quadratic.'
       : this.method === 'spatial'
         ? 'Bodies enter every grid cell touched by their AABB. Cell size trades occupancy against duplication.'
-        : 'X-axis intervals retain temporal order; Y overlap removes candidates before the exact circle test.';
+        : 'Single-axis X intervals retain temporal order and use insertion sort; a secondary Y-AABB test removes candidates before the exact circle test.';
   }
 
   private getPreferredTheme(): ThemeName {
@@ -798,6 +822,7 @@ export class CollisionPipelineApp {
       narrowTime: this.getElement<HTMLElement>('#narrow-time'),
       responseTime: this.getElement<HTMLElement>('#response-time'),
       auxiliaryChecks: this.getElement<HTMLElement>('#auxiliary-checks'),
+      orderingSwaps: this.getElement<HTMLElement>('#ordering-swaps'),
       bucketCount: this.getElement<HTMLElement>('#bucket-count'),
       maxBucketSize: this.getElement<HTMLElement>('#max-bucket-size'),
       auditStatus: this.getElement<HTMLElement>('#audit-status'),
@@ -886,9 +911,9 @@ export class CollisionPipelineApp {
               <div class="canvas-hud">
                 <div><span>Possible</span><strong id="theoretical-pairs">0</strong></div>
                 <i></i>
-                <div><span>Candidates</span><strong id="candidate-count">0</strong></div>
+                <div><span>Broad candidates</span><strong id="candidate-count">0</strong></div>
                 <i></i>
-                <div class="canvas-hud__accent"><span>Contacts</span><strong id="contact-count">0</strong></div>
+                <div class="canvas-hud__accent"><span>Exact contacts</span><strong id="contact-count">0</strong></div>
               </div>
               <div class="pipeline-strip">
                 <span><b>01</b> Broad phase</span><i></i><span><b>02</b> Narrow phase</span><i></i><span><b>03</b> Response</span>
@@ -919,6 +944,7 @@ export class CollisionPipelineApp {
                 <label class="range-row"><span><b>Restitution</b><small>Energy retained by resolved impacts</small></span><output id="restitution-value">0.72</output><input id="restitution-slider" type="range" min="0" max="1" step="0.02" value="0.72" /></label>
                 <label class="range-row"><span><b>Hash cell size</b><small>Occupancy versus multi-cell duplication</small></span><output id="cell-value">32 px</output><input id="cell-slider" type="range" min="16" max="128" step="8" value="${DEFAULT_CELL_SIZE}" /></label>
               </div>
+              <div class="scope-note"><b>Discrete detection</b> Fast bodies can cross between frames. Recall audits current-frame overlaps, not swept paths.</div>
             </section>
 
             <section class="panel">
@@ -929,7 +955,8 @@ export class CollisionPipelineApp {
                 <dt>Response</dt><dd><span id="response-time">0.00</span> ms</dd>
                 <dt>False positives</dt><dd id="false-positive-count">0</dd>
                 <dt>Pairs rejected</dt><dd id="rejection-rate">0.0%</dd>
-                <dt>Internal checks</dt><dd id="auxiliary-checks">0</dd>
+                <dt>Broad pair checks</dt><dd id="auxiliary-checks">0</dd>
+                <dt>Sweep order swaps</dt><dd id="ordering-swaps">—</dd>
                 <dt>Hash buckets</dt><dd id="bucket-count">0</dd>
                 <dt>Max bucket</dt><dd id="max-bucket-size">0</dd>
               </dl>
@@ -967,6 +994,7 @@ export class CollisionPipelineApp {
             <div class="eyebrow">Same-snapshot benchmark</div>
             <h2>Distribution decides the winner.</h2>
             <p id="comparison-status">Freeze one snapshot and run every broad phase against it.</p>
+            <p class="comparison-note">Candidate counts are not identical work units: hash candidates share a cell; sweep candidates already passed X and Y AABB filters. The one-shot sweep timing includes its cold-start sort.</p>
             <button class="button button--primary" id="run-comparison" type="button">Compare all methods</button>
           </div>
           <div class="comparison__cards">
@@ -1002,9 +1030,11 @@ export class CollisionPipelineApp {
             <ul>
               <li>Brute force is retained as both a baseline and the contact-recall oracle.</li>
               <li>Spatial hashing inserts each circle into every cell touched by its AABB.</li>
-              <li>Sweep and prune retains interval order between frames to expose temporal coherence.</li>
+              <li>Sweep and prune retains X-interval order between live frames and repairs it with insertion sort.</li>
               <li>Narrow-phase and response durations are measured separately.</li>
               <li>Scenario presets demonstrate that no broad phase wins every distribution.</li>
+              <li>The canvas is fully cleared each frame; crisp outlines separate dense bodies without accumulating trails.</li>
+              <li>Collision detection is discrete, so sufficiently fast bodies can tunnel between frames.</li>
             </ul>
           </div>
           <div class="dialog__actions"><button class="button" id="close-dialog" type="button">Close</button></div>

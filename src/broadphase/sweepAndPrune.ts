@@ -65,7 +65,8 @@ export class SweepAndPrune {
     return {
       pairs: this.pairs,
       duration: performance.now() - startedAt,
-      auxiliaryChecks: overlapChecks + swaps,
+      auxiliaryChecks: overlapChecks,
+      orderingSwaps: swaps,
       bucketCount: 0,
       maxBucketSize: 0,
     };
