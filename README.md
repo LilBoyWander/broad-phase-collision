@@ -43,16 +43,18 @@ This works especially well for similarly sized objects distributed across space.
 
 ### Sweep And Prune
 
-This educational implementation uses one sorted axis: X. It only scans overlapping X projections, then applies a Y-axis AABB test before emitting candidates for exact circle tests.
+Sweep-and-prune is strongest when motion is coherent and at least one projection separates most bounds. It loses efficiency when many intervals overlap, when objects teleport or reorder rapidly, or when the active set becomes broad enough that pair work approaches quadratic behavior.
 
-Interval order is retained between live frames and repaired with insertion sort, allowing temporal coherence to reduce sorting work. A full sort occurs only when the interval set is initialized or reset. Horizontal crowding weakens the chosen axis.
+This educational implementation sorts one axis, X, and applies Y as a secondary AABB filter before exact circle tests. That is an implementation note rather than the general limitation of sweep-and-prune; production variants may choose an axis dynamically or maintain multiple axes.
+
+Interval order is retained between live frames and repaired with insertion sort. A full sort occurs only when the interval set is initialized or reset.
 
 Candidate counts are not perfectly symmetric across methods. Spatial hash candidates are deduplicated pairs that shared at least one cell, while sweep-and-prune candidates have already passed both X and Y AABB overlap tests. The UI therefore reports broad pair checks separately from emitted candidates, and reports sweep ordering swaps separately. The same-snapshot benchmark includes sweep-and-prune's cold-start sort; live telemetry shows its warm-frame behavior.
 
 The **Key insight** panel translates those counters into method-specific signals:
 
 - Spatial hash shows cell entries per body and bucket checks per emitted candidate, making poor cell sizing visible.
-- Sweep-and-prune shows insertion-sort swaps per body, making temporal coherence visible from frame to frame.
+- Sweep-and-prune shows rolling order repairs and X-overlap checks per body. Exponential smoothing plus state hysteresis keeps the explanation stable while still exposing sustained ordering churn or a growing active set.
 - Brute force shows that it advances 100% of theoretical pairs regardless of distribution.
 
 ## Scenario Matrix
@@ -64,8 +66,11 @@ The **Key insight** panel translates those counters into method-specific signals
 | Horizontal lanes | One-axis projection quality and temporal coherence |
 | Mixed body sizes | Multi-cell insertion and tuning sensitivity |
 | Giant bodies | Duplicate hash work from objects spanning many cells |
+| High-speed CCD crossing | Opposing pairs move farther than their diameter between frames |
 
 Use **Compare all methods** to freeze one snapshot and run each method against identical data. Use **Audit contact recall** to verify the selected method has not missed a contact.
+
+The live **Wins when / Loses when / Read this frame** strip keeps those tradeoffs in the demo itself. The **Live method race** reruns spatial hash and sweep-and-prune on the same current world at 5 Hz, showing rolling broad-phase time, candidates, internal checks, and the shared exact-contact result independently of FPS.
 
 ## Run Locally
 
@@ -112,33 +117,41 @@ The case study claims audited correctness, so that claim is itself tested. [Vite
 - Switch methods with the UI or keys `1`, `2`, and `3`.
 - Press `Space` to pause the simulation.
 - Toggle candidate lines, exact contact normals, short motion ticks, response, continuous detection, and the spatial grid.
+- Set the generated body count to zero and build a workload directly on the canvas.
+- **Launch** a body by dragging its velocity vector, **Dynamic spray** dense moving clusters, paint **Static wall** chains into funnels or pockets, and **Erase** any region.
+- Change body/brush size and clear only user-created geometry without resetting the base scenario.
+- Run the **CCD challenge** to load 48 deterministic opposing pairs whose paths cross entirely between sampled frames.
 - Add 250 bodies at a time with the stress control, up to 2,000.
 
-Candidate lines are intentionally hidden when their count becomes too large to remain useful.
+Candidate lines are sampled when their count becomes too large to draw legibly. The canvas reports exactly how many of the total lines are shown instead of silently hiding the overlay.
 
 ## Reading The Results
 
-Three views turn the raw counters into lessons:
+Four views turn the raw counters into lessons:
 
+- **Live method race** keeps spatial hash and sweep-and-prune beside the workload-building tools, so edits to density, geometry, and motion immediately change their rolling cost and internal work.
 - **Measured stages** splits telemetry into a *Correctness* group (recall, missed contacts, false positives and rate, tunneling saves) and a *Performance* group (stage timings and method-specific work), so quality and cost never get confused.
 - **Scaling behavior** plots broad-phase time against body count from 100 to 2,000 on fresh snapshots of the current scenario. Brute force traces an n² curve while the partitioned methods stay far flatter.
-- **Side-by-side** animates the live simulation through two chosen broad phases at once. The candidate webbing is drawn over identical bodies, so denser lines mean more pairs survived that method's filter.
+- **Side-by-side** animates the live simulation through two chosen broad phases at once. Each panel reports candidates, exact contacts, useful-pair percentage, and duration; a live verdict states which method forwarded fewer pairs on that frame.
 
 ## Continuous Detection (CCD)
 
 Discrete detection inspects only the current frame, so a body moving more than its own radius per frame can pass through another between samples. Enabling **Continuous (CCD)** addresses both halves of that failure:
 
 - Broad phase inflates each body's AABB to span its full frame of motion, so a fast pair is still proposed instead of being pruned.
-- A swept circle-circle test solves for the earliest time of impact in the frame; tunneling pairs are clamped back to that instant and handed to the same impulse solver. The *Tunneling saves* metric counts how many crossings this caught that discrete testing would have missed.
+- A swept circle-circle test solves for time of impact, orders candidate impacts chronologically, and clamps each body to its earliest crossing before handing the contact to the same impulse solver.
+- The canvas draws swept paths in gold, rings recovered bodies, and keeps a cumulative **CCD saves this run** count so a successful recovery remains visible after the impact frame.
 
 ## Implementation Notes
 
 - The simulation uses deterministic seeded scenarios for repeatable resets.
+- User-created bodies share the same pipeline as generated bodies; static brush bodies use zero inverse mass and remain fixed during impulse response.
 - Candidate pairs live in reusable flat `Int32Array` storage to avoid allocating one object per pair.
 - Spatial hashing inserts full circle AABBs rather than only center points.
 - Shared-cell hash pairs are deduplicated before narrow-phase testing.
 - Sweep-and-prune preserves its previous X ordering and uses insertion sort on subsequent live frames.
 - The renderer clears the canvas every frame and uses body outlines plus short per-frame motion ticks rather than accumulated trails.
+- Dense candidate overlays use deterministic line sampling to preserve structure without turning the canvas into an opaque web.
 - Position correction is weighted by inverse mass.
 - Restitution impulses are applied only when bodies are moving toward one another.
 - Audit work is measured separately and does not contaminate live pipeline timings.
@@ -183,9 +196,9 @@ No server process or start command is required for the production deployment.
 
 ## Scope And Limitations
 
-This study uses circles, a single response pass, and one-axis sweep-and-prune. Detection is discrete by default — collision tests inspect only current-frame positions — so sufficiently fast bodies can tunnel between frames. The optional continuous mode adds swept broad-phase bounds and a time-of-impact narrow test to close that gap; the recall audit still verifies current-frame overlaps only.
+This study uses circles, a single response pass, and one-axis X sweep-and-prune. Detection is discrete by default, so sufficiently fast bodies can tunnel between frames. The optional continuous mode adds swept broad-phase bounds and an earliest-impact narrow test; the recall audit still verifies current-frame overlaps only.
 
-A production physics engine would go further: shape-specific narrow phases beyond circles, more complete continuous detection with sub-stepping, persistent manifolds, sleeping, solver iterations, and adaptive broad-phase structures. Supporting rectangles and other shapes is the most natural next step, since broad-phase behavior shifts once bounds are no longer derived from a single radius.
+A production physics engine would go further: shape-specific narrow phases beyond circles, multiple CCD events per body per frame, sub-stepping, persistent manifolds, sleeping, solver iterations, and adaptive broad-phase structures. Supporting rectangles and other shapes is the most natural next step, since broad-phase behavior shifts once bounds are no longer derived from a single radius.
 
 Those omissions keep this case study focused on the contract and tradeoffs of broad-phase candidate generation.
 

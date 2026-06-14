@@ -1,6 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { resolveTunneling, timeOfImpact } from './continuous';
 import { PairBuffer } from '../broadphase/pairBuffer';
+import { runSpatialHashBroadPhase } from '../broadphase/spatialHash';
+import { detectContacts } from './collision';
+import { createBodies, updateBodies } from './world';
 import type { Body, Contact } from './types';
 
 function makeBody(overrides: Partial<Body>): Body {
@@ -85,5 +88,37 @@ describe('resolveTunneling', () => {
     const result = resolveTunneling(bodies, pairs, discrete);
     expect(result.saves).toBe(0);
     expect(bodies[0].x).toBe(100); // untouched
+  });
+
+  it('resolves the earliest impact when pair emission order is reversed', () => {
+    const bodies = [
+      makeBody({ id: 0, radius: 5, previousX: 0, previousY: 50, x: 100, y: 50 }),
+      makeBody({ id: 1, radius: 5, previousX: 30, previousY: 50, x: 30, y: 50 }),
+      makeBody({ id: 2, radius: 5, previousX: 70, previousY: 50, x: 70, y: 50 }),
+    ];
+    const pairs = new PairBuffer();
+    pairs.push(0, 2);
+    pairs.push(0, 1);
+
+    const result = resolveTunneling(bodies, pairs, []);
+    expect(result.saves).toBe(1);
+    expect(bodies[0].x).toBeCloseTo(20, 4);
+    expect(result.contacts[0].b).toBe(1);
+  });
+});
+
+describe('high-speed crossing scenario', () => {
+  it('produces crossings that discrete detection misses and CCD recovers', () => {
+    const bodies = createBodies(48, 'tunneling');
+    let saves = 0;
+
+    for (let frame = 0; frame < 24; frame += 1) {
+      updateBodies(bodies, 1 / 60, 1);
+      const broad = runSpatialHashBroadPhase(bodies, 32, true);
+      const discrete = detectContacts(bodies, broad.pairs);
+      saves += resolveTunneling(bodies, broad.pairs, discrete.contacts).saves;
+    }
+
+    expect(saves).toBeGreaterThan(0);
   });
 });

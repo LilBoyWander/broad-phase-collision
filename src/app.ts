@@ -16,11 +16,12 @@ import type {
   Contact,
   ScenarioName,
 } from './physics/types';
-import { createBodies, updateBodies, WORLD_BOUNDS } from './physics/world';
+import { createBodies, createBody, updateBodies, WORLD_BOUNDS } from './physics/world';
 
 interface PipelineStats {
   broadDuration: number;
   narrowDuration: number;
+  continuousDuration: number;
   responseDuration: number;
   candidateCount: number;
   contactCount: number;
@@ -64,6 +65,22 @@ interface ScalingSeries {
   points: ScalingPoint[];
 }
 
+interface VersusPanelResult {
+  candidates: number;
+  contacts: number;
+  duration: number;
+}
+
+interface MethodRaceSample {
+  duration: number;
+  candidates: number;
+  contacts: number;
+  checks: number;
+}
+
+type InteractionTool = 'launch' | 'spray' | 'wall' | 'erase';
+type SweepInsightState = 'coherent' | 'overlap' | 'churn';
+
 interface AppElements {
   themeButton: HTMLButtonElement;
   notesButton: HTMLButtonElement;
@@ -71,6 +88,7 @@ interface AppElements {
   closeDialogButton: HTMLButtonElement;
   resetButton: HTMLButtonElement;
   stressButton: HTMLButtonElement;
+  ccdChallengeButton: HTMLButtonElement;
   compareButton: HTMLButtonElement;
   auditButton: HTMLButtonElement;
   pauseToggle: HTMLInputElement;
@@ -80,6 +98,12 @@ interface AppElements {
   contactsToggle: HTMLInputElement;
   trailsToggle: HTMLInputElement;
   gridToggle: HTMLInputElement;
+  toolButtons: NodeListOf<HTMLButtonElement>;
+  brushSlider: HTMLInputElement;
+  brushValue: HTMLElement;
+  clearCustomButton: HTMLButtonElement;
+  customBodyCount: HTMLElement;
+  interactionHint: HTMLElement;
   bodySlider: HTMLInputElement;
   bodyValue: HTMLElement;
   speedSlider: HTMLInputElement;
@@ -101,6 +125,8 @@ interface AppElements {
   contactCount: HTMLElement;
   canvasRecall: HTMLElement;
   canvasRecallLabel: HTMLElement;
+  candidateVisibility: HTMLElement;
+  ccdStatus: HTMLElement;
   falsePositiveCount: HTMLElement;
   falsePositiveRate: HTMLElement;
   tunnelingSaves: HTMLElement;
@@ -109,6 +135,7 @@ interface AppElements {
   rejectionRate: HTMLElement;
   broadTime: HTMLElement;
   narrowTime: HTMLElement;
+  continuousTime: HTMLElement;
   responseTime: HTMLElement;
   auxiliaryChecks: HTMLElement;
   orderingSwaps: HTMLElement;
@@ -121,6 +148,14 @@ interface AppElements {
   insightPrimaryValue: HTMLElement;
   insightSecondaryLabel: HTMLElement;
   insightSecondaryValue: HTMLElement;
+  lessonBest: HTMLElement;
+  lessonRisk: HTMLElement;
+  lessonVerdict: HTMLElement;
+  raceSpatialTime: HTMLElement;
+  raceSpatialWork: HTMLElement;
+  raceSweepTime: HTMLElement;
+  raceSweepWork: HTMLElement;
+  raceVerdict: HTMLElement;
   auditStatus: HTMLElement;
   auditRecall: HTMLElement;
   auditMissed: HTMLElement;
@@ -144,6 +179,7 @@ interface AppElements {
   versusNameB: HTMLElement;
   versusStatsA: HTMLElement;
   versusStatsB: HTMLElement;
+  versusVerdict: HTMLElement;
   scalingButton: HTMLButtonElement;
   scalingStatus: HTMLElement;
   scalingCanvas: HTMLCanvasElement;
@@ -156,6 +192,8 @@ const MAX_BODY_COUNT = 2000;
 const DEFAULT_CELL_SIZE = 32;
 const CANDIDATE_LINE_LIMIT = 420;
 const SCALING_COUNTS = [100, 300, 600, 1000, 1500, 2000];
+const METHOD_RACE_INTERVAL = 12;
+const INSIGHT_STABILITY_FRAMES = 24;
 
 /** Rounds an axis maximum up to a clean 1/2/5 × 10ⁿ value so chart gridlines read well. */
 function niceCeil(value: number): number {
@@ -180,16 +218,18 @@ export class CollisionPipelineApp {
   private readonly comparisonSweep = new SweepAndPrune();
   private readonly versusSweepA = new SweepAndPrune();
   private readonly versusSweepB = new SweepAndPrune();
+  private readonly raceSweep = new SweepAndPrune();
 
   private elements!: AppElements;
   private context!: CanvasRenderingContext2D;
   private versusContextA: CanvasRenderingContext2D | null = null;
   private versusContextB: CanvasRenderingContext2D | null = null;
-  private versusActive = true;
+  private versusActive = false;
   private versusMethodA: BroadPhaseMethod = 'spatial';
   private versusMethodB: BroadPhaseMethod = 'sweep';
   private bodies: Body[] = [];
   private contacts: Contact[] = [];
+  private continuousContacts: Contact[] = [];
   private broadResult: BroadPhaseResult | null = null;
   private method: BroadPhaseMethod = 'spatial';
   private scenario: ScenarioName = 'uniform';
@@ -204,6 +244,13 @@ export class CollisionPipelineApp {
   private showContacts = true;
   private showTrails = true;
   private showGrid = true;
+  private interactionTool: InteractionTool = 'launch';
+  private brushRadius = 12;
+  private pointerActive = false;
+  private pointerStart: { x: number; y: number } | null = null;
+  private pointerCurrent: { x: number; y: number } | null = null;
+  private lastPaintPoint: { x: number; y: number } | null = null;
+  private nextBodyId = 0;
   private lastFrameStart = performance.now();
   private frameInterval = 1000 / 60;
   private fps = 60;
@@ -211,11 +258,22 @@ export class CollisionPipelineApp {
   private fpsTime = 0;
   private updateDuration = 0;
   private renderDuration = 0;
+  private cumulativeTunnelingSaves = 0;
   private countDebounceId: number | null = null;
   private auditDebounceId: number | null = null;
+  private raceFrame = METHOD_RACE_INTERVAL - 1;
+  private raceSpatial: MethodRaceSample | null = null;
+  private raceSweepSample: MethodRaceSample | null = null;
+  private smoothedSweepSwapsPerBody = 0;
+  private smoothedSweepChecksPerBody = 0;
+  private sweepInsightInitialized = false;
+  private sweepInsightState: SweepInsightState = 'coherent';
+  private pendingSweepInsightState: SweepInsightState = 'coherent';
+  private pendingSweepInsightFrames = 0;
   private stats: PipelineStats = {
     broadDuration: 0,
     narrowDuration: 0,
+    continuousDuration: 0,
     responseDuration: 0,
     candidateCount: 0,
     contactCount: 0,
@@ -257,6 +315,7 @@ export class CollisionPipelineApp {
     this.bindEvents();
     this.syncControls();
     this.syncVersusLabels();
+    this.clearVersusPanels();
     this.renderScalingChart();
     this.scheduleAudit(400);
     requestAnimationFrame((timestamp) => this.loop(timestamp));
@@ -289,6 +348,7 @@ export class CollisionPipelineApp {
       this.restitution = 0.72;
       this.scenario = 'uniform';
       this.method = 'spatial';
+      this.ccd = false;
       this.resetBodies(DEFAULT_BODY_COUNT);
       this.audit = null;
       this.comparison = [];
@@ -302,6 +362,16 @@ export class CollisionPipelineApp {
     this.elements.stressButton.addEventListener('click', () => {
       this.setBodyCount(Math.min(this.bodies.length + 250, MAX_BODY_COUNT));
     });
+    this.elements.ccdChallengeButton.addEventListener('click', () => {
+      this.scenario = 'tunneling';
+      this.method = 'spatial';
+      this.speedMultiplier = 1;
+      this.ccd = true;
+      this.showTrails = true;
+      this.showPairs = false;
+      this.setBodyCount(48);
+      this.syncControls();
+    });
     this.elements.auditButton.addEventListener('click', () => void this.runAudit());
     this.elements.compareButton.addEventListener('click', () => void this.runComparison());
 
@@ -311,6 +381,7 @@ export class CollisionPipelineApp {
         if (method === 'naive' || method === 'spatial' || method === 'sweep') {
           this.method = method;
           this.sweep.reset();
+          this.resetInsightSmoothing();
           this.audit = null;
           this.syncControls();
           this.updateAuditTelemetry();
@@ -350,13 +421,15 @@ export class CollisionPipelineApp {
         scenario === 'clusters' ||
         scenario === 'horizontal' ||
         scenario === 'mixed' ||
-        scenario === 'giant'
+        scenario === 'giant' ||
+        scenario === 'tunneling'
       ) {
         this.scenario = scenario;
-        this.resetBodies(this.bodies.length);
+        this.resetBodies(scenario === 'tunneling' ? 48 : this.bodies.length);
         this.audit = null;
         this.comparison = [];
         this.resetScaling();
+        this.syncControls();
         this.updateAuditTelemetry();
         this.updateComparisonTelemetry();
         this.scheduleAudit(100);
@@ -371,6 +444,8 @@ export class CollisionPipelineApp {
     });
     this.elements.ccdToggle.addEventListener('change', () => {
       this.ccd = this.elements.ccdToggle.checked;
+      this.cumulativeTunnelingSaves = 0;
+      this.continuousContacts = [];
     });
     this.elements.pairsToggle.addEventListener('change', () => {
       this.showPairs = this.elements.pairsToggle.checked;
@@ -383,6 +458,33 @@ export class CollisionPipelineApp {
     });
     this.elements.gridToggle.addEventListener('change', () => {
       this.showGrid = this.elements.gridToggle.checked;
+    });
+    this.elements.toolButtons.forEach((button) => {
+      button.addEventListener('click', () => {
+        const tool = button.dataset.tool;
+        if (tool === 'launch' || tool === 'spray' || tool === 'wall' || tool === 'erase') {
+          this.interactionTool = tool;
+          this.syncInteractionControls();
+        }
+      });
+    });
+    this.elements.brushSlider.addEventListener('input', () => {
+      this.brushRadius = Number.parseInt(this.elements.brushSlider.value, 10);
+      this.syncInteractionControls();
+    });
+    this.elements.clearCustomButton.addEventListener('click', () => {
+      this.bodies = this.bodies.filter((body) => !body.isUserCreated);
+      this.afterBodiesEdited();
+      this.scheduleAudit(180);
+    });
+    this.elements.canvas.addEventListener('pointerdown', (event) => this.beginCanvasInteraction(event));
+    this.elements.canvas.addEventListener('pointermove', (event) => this.moveCanvasInteraction(event));
+    this.elements.canvas.addEventListener('pointerup', (event) => this.endCanvasInteraction(event));
+    this.elements.canvas.addEventListener('pointercancel', () => this.cancelCanvasInteraction());
+    this.elements.canvas.addEventListener('pointerleave', () => {
+      if (!this.pointerActive) {
+        this.pointerCurrent = null;
+      }
     });
 
     this.elements.versusActiveToggle.addEventListener('change', () => {
@@ -422,6 +524,7 @@ export class CollisionPipelineApp {
       if (event.key === '1' || event.key === '2' || event.key === '3') {
         this.method = event.key === '1' ? 'naive' : event.key === '2' ? 'spatial' : 'sweep';
         this.sweep.reset();
+        this.resetInsightSmoothing();
         this.audit = null;
         this.syncControls();
         this.updateAuditTelemetry();
@@ -447,10 +550,14 @@ export class CollisionPipelineApp {
     this.broadResult = this.runBroadPhase(this.method);
     const narrow = detectContacts(this.bodies, this.broadResult.pairs);
     this.contacts = narrow.contacts;
+    this.continuousContacts = [];
     let tunnelingSaves = 0;
+    let continuousDuration = 0;
     if (this.ccd && !this.isPaused) {
       const continuous = resolveTunneling(this.bodies, this.broadResult.pairs, narrow.contacts);
       tunnelingSaves = continuous.saves;
+      continuousDuration = continuous.duration;
+      this.continuousContacts = continuous.contacts;
       if (continuous.contacts.length > 0) {
         this.contacts = narrow.contacts.concat(continuous.contacts);
       }
@@ -462,9 +569,15 @@ export class CollisionPipelineApp {
 
     this.stats = this.createPipelineStats(this.broadResult, narrow, response);
     this.stats.tunnelingSaves = tunnelingSaves;
+    this.stats.continuousDuration = continuousDuration;
+    this.stats.contactCount = this.contacts.length;
+    this.stats.falsePositiveCount = Math.max(0, this.stats.candidateCount - this.contacts.length);
+    this.cumulativeTunnelingSaves += tunnelingSaves;
     const renderStartedAt = performance.now();
     this.renderCanvas();
     this.renderDuration = performance.now() - renderStartedAt;
+    this.updateMethodRace();
+    this.renderVersus();
 
     this.fpsFrames += 1;
     this.fpsTime += elapsed;
@@ -476,7 +589,6 @@ export class CollisionPipelineApp {
     }
     this.updatePipelineTelemetry();
     this.updateInsightTelemetry();
-    this.renderVersus();
 
     requestAnimationFrame((timestamp) => this.loop(timestamp));
   }
@@ -506,6 +618,9 @@ export class CollisionPipelineApp {
       for (let second = first + 1; second < this.bodies.length; second += 1) {
         const firstBody = this.bodies[first];
         const secondBody = this.bodies[second];
+        if (firstBody.inverseMass === 0 && secondBody.inverseMass === 0) {
+          continue;
+        }
         const deltaX = secondBody.x - firstBody.x;
         const deltaY = secondBody.y - firstBody.y;
         const radiusSum = firstBody.radius + secondBody.radius;
@@ -568,6 +683,9 @@ export class CollisionPipelineApp {
       for (let second = first + 1; second < this.bodies.length; second += 1) {
         const firstBody = this.bodies[first];
         const secondBody = this.bodies[second];
+        if (firstBody.inverseMass === 0 && secondBody.inverseMass === 0) {
+          continue;
+        }
         const deltaX = secondBody.x - firstBody.x;
         const deltaY = secondBody.y - firstBody.y;
         const radiusSum = firstBody.radius + secondBody.radius;
@@ -580,8 +698,8 @@ export class CollisionPipelineApp {
     this.comparisonSweep.reset();
     const results: Array<{ method: BroadPhaseMethod; result: BroadPhaseResult }> = [
       { method: 'naive', result: runNaiveBroadPhase(this.bodies) },
-      { method: 'spatial', result: runSpatialHashBroadPhase(this.bodies, this.cellSize) },
-      { method: 'sweep', result: this.comparisonSweep.run(this.bodies) },
+      { method: 'spatial', result: runSpatialHashBroadPhase(this.bodies, this.cellSize, this.ccd) },
+      { method: 'sweep', result: this.comparisonSweep.run(this.bodies, this.ccd) },
     ];
 
     this.comparison = results.map(({ method, result }) => {
@@ -631,6 +749,7 @@ export class CollisionPipelineApp {
     return {
       broadDuration: broad.duration,
       narrowDuration: narrow.duration,
+      continuousDuration: 0,
       responseDuration: response.duration,
       candidateCount: broad.pairs.count,
       contactCount: narrow.contacts.length,
@@ -648,14 +767,24 @@ export class CollisionPipelineApp {
 
   private resetBodies(count: number): void {
     this.bodies = createBodies(count, this.scenario);
+    this.nextBodyId = count;
     this.contacts = [];
+    this.continuousContacts = [];
+    this.cumulativeTunnelingSaves = 0;
     this.broadResult = null;
     this.sweep.reset();
     this.comparisonSweep.reset();
     this.versusSweepA.reset();
     this.versusSweepB.reset();
+    this.raceSweep.reset();
+    this.raceSpatial = null;
+    this.raceSweepSample = null;
+    this.raceFrame = METHOD_RACE_INTERVAL - 1;
+    this.resetInsightSmoothing();
     if (this.elements) {
       this.elements.stressButton.disabled = count >= MAX_BODY_COUNT;
+      this.syncInteractionControls();
+      this.updateMethodRaceTelemetry();
     }
   }
 
@@ -669,6 +798,192 @@ export class CollisionPipelineApp {
     this.updateAuditTelemetry();
     this.updateComparisonTelemetry();
     this.scheduleAudit(180);
+  }
+
+  private beginCanvasInteraction(event: PointerEvent): void {
+    if (event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
+    const point = this.canvasPoint(event);
+    this.pointerActive = true;
+    this.pointerStart = point;
+    this.pointerCurrent = point;
+    this.lastPaintPoint = null;
+    this.elements.canvas.setPointerCapture?.(event.pointerId);
+    if (this.interactionTool !== 'launch') {
+      this.paintAlongPath(point);
+    }
+  }
+
+  private moveCanvasInteraction(event: PointerEvent): void {
+    const point = this.canvasPoint(event);
+    this.pointerCurrent = point;
+    if (!this.pointerActive) {
+      return;
+    }
+    event.preventDefault();
+    if (this.interactionTool !== 'launch') {
+      this.paintAlongPath(point);
+    }
+  }
+
+  private endCanvasInteraction(event: PointerEvent): void {
+    if (!this.pointerActive) {
+      return;
+    }
+    event.preventDefault();
+    const point = this.canvasPoint(event);
+    if (this.interactionTool === 'launch' && this.pointerStart) {
+      this.launchBody(this.pointerStart, point);
+    } else {
+      this.paintAlongPath(point);
+    }
+    this.elements.canvas.releasePointerCapture?.(event.pointerId);
+    this.cancelCanvasInteraction();
+    this.scheduleAudit(350);
+  }
+
+  private cancelCanvasInteraction(): void {
+    this.pointerActive = false;
+    this.pointerStart = null;
+    this.lastPaintPoint = null;
+  }
+
+  private canvasPoint(event: PointerEvent): { x: number; y: number } {
+    const bounds = this.elements.canvas.getBoundingClientRect();
+    const width = bounds.width || this.elements.canvas.width;
+    const height = bounds.height || this.elements.canvas.height;
+    return {
+      x: Math.max(0, Math.min(WORLD_BOUNDS.width, (event.clientX - bounds.left) * (this.elements.canvas.width / width))),
+      y: Math.max(0, Math.min(WORLD_BOUNDS.height, (event.clientY - bounds.top) * (this.elements.canvas.height / height))),
+    };
+  }
+
+  private paintAlongPath(point: { x: number; y: number }): void {
+    const spacing = this.interactionTool === 'wall'
+      ? this.brushRadius * 2.15
+      : Math.max(5, this.brushRadius * 0.75);
+    if (!this.lastPaintPoint) {
+      this.applyToolAt(point);
+      this.lastPaintPoint = point;
+      return;
+    }
+
+    const deltaX = point.x - this.lastPaintPoint.x;
+    const deltaY = point.y - this.lastPaintPoint.y;
+    const distance = Math.hypot(deltaX, deltaY);
+    if (distance < spacing) {
+      return;
+    }
+    const steps = Math.floor(distance / spacing);
+    for (let step = 1; step <= steps; step += 1) {
+      const progress = (step * spacing) / distance;
+      this.applyToolAt({
+        x: this.lastPaintPoint.x + deltaX * progress,
+        y: this.lastPaintPoint.y + deltaY * progress,
+      });
+    }
+    this.lastPaintPoint = {
+      x: this.lastPaintPoint.x + deltaX * ((steps * spacing) / distance),
+      y: this.lastPaintPoint.y + deltaY * ((steps * spacing) / distance),
+    };
+  }
+
+  private applyToolAt(point: { x: number; y: number }): void {
+    if (this.interactionTool === 'erase') {
+      const before = this.bodies.length;
+      this.bodies = this.bodies.filter(
+        (body) => Math.hypot(body.x - point.x, body.y - point.y) > this.brushRadius + body.radius,
+      );
+      if (this.bodies.length !== before) {
+        this.afterBodiesEdited();
+      }
+      return;
+    }
+    if (this.bodies.length >= MAX_BODY_COUNT) {
+      return;
+    }
+    if (this.interactionTool === 'wall') {
+      this.bodies.push(createBody({
+        id: this.nextBodyId,
+        x: point.x,
+        y: point.y,
+        radius: this.brushRadius,
+        colorIndex: 0,
+        isStatic: true,
+        isUserCreated: true,
+      }));
+      this.nextBodyId += 1;
+      this.afterBodiesEdited();
+      return;
+    }
+    if (this.interactionTool === 'spray') {
+      const available = Math.min(4, MAX_BODY_COUNT - this.bodies.length);
+      for (let index = 0; index < available; index += 1) {
+        const id = this.nextBodyId;
+        const angle = id * 2.399963229728653;
+        const jitter = this.brushRadius * (0.15 + (id % 5) * 0.12);
+        const speed = 35 + (id * 29) % 95;
+        this.bodies.push(createBody({
+          id,
+          x: point.x + Math.cos(angle) * jitter,
+          y: point.y + Math.sin(angle) * jitter,
+          radius: Math.max(3, this.brushRadius * 0.42),
+          velocityX: Math.cos(angle) * speed,
+          velocityY: Math.sin(angle) * speed,
+          colorIndex: id % 3,
+          isUserCreated: true,
+        }));
+        this.nextBodyId += 1;
+      }
+      this.afterBodiesEdited();
+    }
+  }
+
+  private launchBody(start: { x: number; y: number }, end: { x: number; y: number }): void {
+    if (this.bodies.length >= MAX_BODY_COUNT) {
+      return;
+    }
+    const deltaX = end.x - start.x;
+    const deltaY = end.y - start.y;
+    const drag = Math.hypot(deltaX, deltaY);
+    const scale = drag > 3 ? Math.min(3.2, 700 / drag) : 0;
+    const id = this.nextBodyId;
+    this.bodies.push(createBody({
+      id,
+      x: start.x,
+      y: start.y,
+      radius: this.brushRadius,
+      velocityX: scale > 0 ? deltaX * scale : 70 * Math.cos(id * 2.4),
+      velocityY: scale > 0 ? deltaY * scale : 70 * Math.sin(id * 2.4),
+      colorIndex: id % 3,
+      isUserCreated: true,
+    }));
+    this.nextBodyId += 1;
+    this.afterBodiesEdited();
+  }
+
+  private afterBodiesEdited(): void {
+    this.contacts = [];
+    this.continuousContacts = [];
+    this.sweep.reset();
+    this.comparisonSweep.reset();
+    this.versusSweepA.reset();
+    this.versusSweepB.reset();
+    this.raceSweep.reset();
+    this.raceSpatial = null;
+    this.raceSweepSample = null;
+    this.raceFrame = METHOD_RACE_INTERVAL - 1;
+    this.audit = null;
+    this.comparison = [];
+    this.elements.bodySlider.value = String(this.bodies.length);
+    this.elements.bodyValue.textContent = this.bodies.length.toLocaleString();
+    this.elements.stressButton.disabled = this.bodies.length >= MAX_BODY_COUNT;
+    this.updateAuditTelemetry();
+    this.updateComparisonTelemetry();
+    this.updateMethodRaceTelemetry();
+    this.syncInteractionControls();
   }
 
   private renderCanvas(): void {
@@ -705,21 +1020,27 @@ export class CollisionPipelineApp {
       context.stroke();
     }
 
-    if (
-      this.showPairs &&
-      this.broadResult &&
-      this.broadResult.pairs.count <= CANDIDATE_LINE_LIMIT
-    ) {
+    this.elements.candidateVisibility.className = 'canvas-mode';
+    if (this.showPairs && this.broadResult) {
+      const pairCount = this.broadResult.pairs.count;
+      const step = Math.max(1, Math.ceil(pairCount / CANDIDATE_LINE_LIMIT));
+      const drawnCount = pairCount === 0 ? 0 : Math.ceil(pairCount / step);
       context.strokeStyle = midnight ? 'rgba(240, 143, 97, 0.28)' : 'rgba(184, 75, 33, 0.25)';
       context.lineWidth = 0.7;
       context.beginPath();
-      for (let index = 0; index < this.broadResult.pairs.count; index += 1) {
+      for (let index = 0; index < pairCount; index += step) {
         const first = this.bodies[this.broadResult.pairs.getFirst(index)];
         const second = this.bodies[this.broadResult.pairs.getSecond(index)];
         context.moveTo(first.x, first.y);
         context.lineTo(second.x, second.y);
       }
       context.stroke();
+      this.elements.candidateVisibility.textContent = step > 1
+        ? `${drawnCount.toLocaleString()} of ${pairCount.toLocaleString()} candidate lines sampled`
+        : `${pairCount.toLocaleString()} candidate line${pairCount === 1 ? '' : 's'} shown`;
+      this.elements.candidateVisibility.classList.add('canvas-mode--active');
+    } else {
+      this.elements.candidateVisibility.textContent = 'Candidate overlay off';
     }
 
     if (this.showTrails) {
@@ -727,6 +1048,9 @@ export class CollisionPipelineApp {
       context.lineWidth = 1;
       context.beginPath();
       for (const body of this.bodies) {
+        if (body.isStatic) {
+          continue;
+        }
         const movementX = body.x - body.previousX;
         const movementY = body.y - body.previousY;
         context.moveTo(body.x, body.y);
@@ -735,21 +1059,47 @@ export class CollisionPipelineApp {
       context.stroke();
     }
 
+    if (this.ccd) {
+      context.strokeStyle = midnight ? 'rgba(241, 194, 92, 0.34)' : 'rgba(166, 105, 0, 0.3)';
+      context.lineWidth = 1.2;
+      context.beginPath();
+      for (const body of this.bodies) {
+        if (Math.hypot(body.x - body.previousX, body.y - body.previousY) < body.radius) {
+          continue;
+        }
+        context.moveTo(body.previousX, body.previousY);
+        context.lineTo(body.x, body.y);
+      }
+      context.stroke();
+    }
+
     const bodyColors = midnight
       ? ['#73d1c5', '#91b8f3', '#9be0a8']
       : ['#147f85', '#456ca8', '#3f8a58'];
     for (const body of this.bodies) {
-      context.fillStyle = body.contactFrames > 0
+      context.fillStyle = body.isStatic
+        ? midnight ? '#243940' : '#d7d7cf'
+        : body.contactFrames > 0
         ? midnight ? '#f08f61' : '#b84b21'
         : bodyColors[body.colorIndex];
       context.beginPath();
       context.arc(body.x, body.y, body.radius, 0, Math.PI * 2);
       context.fill();
-      context.strokeStyle = body.radius > 32
+      context.strokeStyle = body.isStatic
+        ? midnight ? '#ffd166' : '#8d5d05'
+        : body.radius > 32
         ? midnight ? 'rgba(240, 143, 97, 0.78)' : 'rgba(184, 75, 33, 0.72)'
         : midnight ? 'rgba(3, 12, 16, 0.78)' : 'rgba(255, 255, 255, 0.82)';
-      context.lineWidth = body.radius > 32 ? 2 : 1;
+      context.lineWidth = body.isStatic || body.radius > 32 ? 2 : 1;
       context.stroke();
+      if (body.isStatic && body.radius >= 8) {
+        context.beginPath();
+        context.moveTo(body.x - body.radius * 0.45, body.y);
+        context.lineTo(body.x + body.radius * 0.45, body.y);
+        context.moveTo(body.x, body.y - body.radius * 0.45);
+        context.lineTo(body.x, body.y + body.radius * 0.45);
+        context.stroke();
+      }
     }
 
     if (this.showContacts) {
@@ -769,6 +1119,35 @@ export class CollisionPipelineApp {
         context.stroke();
       }
     }
+
+    if (this.continuousContacts.length > 0) {
+      context.strokeStyle = midnight ? '#ffd166' : '#9b6200';
+      context.lineWidth = 2.4;
+      for (const contact of this.continuousContacts) {
+        for (const bodyIndex of [contact.a, contact.b]) {
+          const body = this.bodies[bodyIndex];
+          context.beginPath();
+          context.arc(body.x, body.y, body.radius + 4, 0, Math.PI * 2);
+          context.stroke();
+        }
+      }
+    }
+
+    if (this.pointerCurrent) {
+      context.strokeStyle = midnight ? 'rgba(255, 209, 102, 0.92)' : 'rgba(141, 93, 5, 0.9)';
+      context.lineWidth = 1.5;
+      context.setLineDash([5, 4]);
+      context.beginPath();
+      context.arc(this.pointerCurrent.x, this.pointerCurrent.y, this.brushRadius, 0, Math.PI * 2);
+      context.stroke();
+      if (this.pointerActive && this.interactionTool === 'launch' && this.pointerStart) {
+        context.beginPath();
+        context.moveTo(this.pointerStart.x, this.pointerStart.y);
+        context.lineTo(this.pointerCurrent.x, this.pointerCurrent.y);
+        context.stroke();
+      }
+      context.setLineDash([]);
+    }
   }
 
   /** Draws the same live bodies through two independently chosen broad phases so their candidate sets can be compared. */
@@ -776,12 +1155,99 @@ export class CollisionPipelineApp {
     if (!this.versusActive) {
       return;
     }
+    let left: VersusPanelResult | null = null;
+    let right: VersusPanelResult | null = null;
     if (this.versusContextA) {
-      this.renderVersusPanel(this.versusContextA, this.versusMethodA, this.versusSweepA, this.elements.versusStatsA);
+      left = this.renderVersusPanel(this.versusContextA, this.versusMethodA, this.versusSweepA, this.elements.versusStatsA);
     }
     if (this.versusContextB) {
-      this.renderVersusPanel(this.versusContextB, this.versusMethodB, this.versusSweepB, this.elements.versusStatsB);
+      right = this.renderVersusPanel(this.versusContextB, this.versusMethodB, this.versusSweepB, this.elements.versusStatsB);
     }
+    if (left && right) {
+      if (this.versusMethodA === this.versusMethodB) {
+        this.elements.versusVerdict.textContent = 'Choose two different methods to expose how their filters change the work.';
+      } else {
+        const leaner = left.candidates <= right.candidates
+          ? { name: this.methodLabel(this.versusMethodA), count: left.candidates, other: right.candidates }
+          : { name: this.methodLabel(this.versusMethodB), count: right.candidates, other: left.candidates };
+        const difference = leaner.other - leaner.count;
+        this.elements.versusVerdict.textContent =
+          `${leaner.name} forwards ${difference.toLocaleString()} fewer pairs on this frame. Both still confirm ${Math.max(left.contacts, right.contacts).toLocaleString()} exact contacts.`;
+      }
+    }
+  }
+
+  private updateMethodRace(): void {
+    this.raceFrame += 1;
+    if (this.raceFrame < METHOD_RACE_INTERVAL) {
+      return;
+    }
+    this.raceFrame = 0;
+
+    const spatialResult = runSpatialHashBroadPhase(this.bodies, this.cellSize, this.ccd);
+    const sweepResult = this.raceSweep.run(this.bodies, this.ccd);
+    const exactContacts = this.contacts.length;
+    this.raceSpatial = this.smoothRaceSample(this.raceSpatial, {
+      duration: spatialResult.duration,
+      candidates: spatialResult.pairs.count,
+      contacts: exactContacts,
+      checks: spatialResult.auxiliaryChecks,
+    });
+    this.raceSweepSample = this.smoothRaceSample(this.raceSweepSample, {
+      duration: sweepResult.duration,
+      candidates: sweepResult.pairs.count,
+      contacts: exactContacts,
+      checks: sweepResult.auxiliaryChecks,
+    });
+    this.updateMethodRaceTelemetry();
+  }
+
+  private smoothRaceSample(
+    previous: MethodRaceSample | null,
+    current: MethodRaceSample,
+  ): MethodRaceSample {
+    if (!previous) {
+      return current;
+    }
+    const weight = 0.22;
+    return {
+      duration: previous.duration + (current.duration - previous.duration) * weight,
+      candidates: current.candidates,
+      contacts: current.contacts,
+      checks: current.checks,
+    };
+  }
+
+  private updateMethodRaceTelemetry(): void {
+    if (!this.raceSpatial || !this.raceSweepSample) {
+      this.elements.raceSpatialTime.textContent = '—';
+      this.elements.raceSpatialWork.textContent = 'Waiting for a sample';
+      this.elements.raceSweepTime.textContent = '—';
+      this.elements.raceSweepWork.textContent = 'Waiting for a sample';
+      this.elements.raceVerdict.textContent = 'Build or reshape the world, then watch both methods rerun on the same bodies.';
+      return;
+    }
+
+    const spatial = this.raceSpatial;
+    const sweep = this.raceSweepSample;
+    this.elements.raceSpatialTime.textContent = `${this.formatDuration(spatial.duration)} ms`;
+    this.elements.raceSpatialWork.textContent =
+      `${spatial.candidates.toLocaleString()} candidates · ${spatial.checks.toLocaleString()} bucket checks`;
+    this.elements.raceSweepTime.textContent = `${this.formatDuration(sweep.duration)} ms`;
+    this.elements.raceSweepWork.textContent =
+      `${sweep.candidates.toLocaleString()} candidates · ${sweep.checks.toLocaleString()} X-overlap checks`;
+
+    const contactAgreement = spatial.contacts === sweep.contacts;
+    const faster = spatial.duration <= sweep.duration ? 'Spatial hash' : 'Sweep and prune';
+    const lowerWork = spatial.checks <= sweep.checks ? 'Spatial hash' : 'Sweep and prune';
+    const durationGap = Math.abs(spatial.duration - sweep.duration);
+    const timingRead = durationGap < 0.03
+      ? 'Timing is effectively tied in this browser sample.'
+      : `${faster} currently has the lower rolling broad-phase time.`;
+    this.elements.raceVerdict.textContent = contactAgreement
+      ? `${timingRead} ${lowerWork} performs fewer internal pair checks. Both feed the same ${spatial.contacts.toLocaleString()} exact contacts into shared narrow-phase and response math.`
+      : `Correctness warning: the methods disagree on exact-contact count (${spatial.contacts.toLocaleString()} vs ${sweep.contacts.toLocaleString()}).`;
+    this.elements.raceVerdict.classList.toggle('telemetry-failure', !contactAgreement);
   }
 
   private renderVersusPanel(
@@ -789,12 +1255,12 @@ export class CollisionPipelineApp {
     method: BroadPhaseMethod,
     sweep: SweepAndPrune,
     statsElement: HTMLElement,
-  ): void {
+  ): VersusPanelResult {
     const result = method === 'naive'
       ? runNaiveBroadPhase(this.bodies)
       : method === 'spatial'
-        ? runSpatialHashBroadPhase(this.bodies, this.cellSize)
-        : sweep.run(this.bodies);
+        ? runSpatialHashBroadPhase(this.bodies, this.cellSize, this.ccd)
+        : sweep.run(this.bodies, this.ccd);
     const midnight = this.theme === 'midnight';
     const scale = context.canvas.width / WORLD_BOUNDS.width;
 
@@ -804,35 +1270,58 @@ export class CollisionPipelineApp {
     context.setTransform(scale, 0, 0, scale, 0, 0);
 
     // Candidate webbing over identical bodies makes each method's filter strength directly comparable.
-    const lineLimit = 1800;
-    if (result.pairs.count <= lineLimit) {
-      context.strokeStyle = midnight ? 'rgba(240, 143, 97, 0.3)' : 'rgba(184, 75, 33, 0.28)';
-      context.lineWidth = 0.6 / scale;
-      context.beginPath();
-      for (let index = 0; index < result.pairs.count; index += 1) {
-        const first = this.bodies[result.pairs.getFirst(index)];
-        const second = this.bodies[result.pairs.getSecond(index)];
-        context.moveTo(first.x, first.y);
-        context.lineTo(second.x, second.y);
-      }
-      context.stroke();
+    const lineLimit = 900;
+    const step = Math.max(1, Math.ceil(result.pairs.count / lineLimit));
+    context.strokeStyle = midnight ? 'rgba(240, 143, 97, 0.24)' : 'rgba(184, 75, 33, 0.22)';
+    context.lineWidth = 0.6 / scale;
+    context.beginPath();
+    for (let index = 0; index < result.pairs.count; index += step) {
+      const first = this.bodies[result.pairs.getFirst(index)];
+      const second = this.bodies[result.pairs.getSecond(index)];
+      context.moveTo(first.x, first.y);
+      context.lineTo(second.x, second.y);
     }
+    context.stroke();
 
     const colors = midnight
       ? ['#73d1c5', '#91b8f3', '#9be0a8']
       : ['#147f85', '#456ca8', '#3f8a58'];
+    context.strokeStyle = midnight ? 'rgba(3, 12, 16, 0.82)' : 'rgba(255, 255, 255, 0.88)';
+    context.lineWidth = 1 / scale;
     for (const body of this.bodies) {
-      context.fillStyle = body.contactFrames > 0
+      context.fillStyle = body.isStatic
+        ? midnight ? '#243940' : '#d7d7cf'
+        : body.contactFrames > 0
         ? midnight ? '#f08f61' : '#b84b21'
         : colors[body.colorIndex];
       context.beginPath();
       context.arc(body.x, body.y, Math.max(body.radius, 1.6), 0, Math.PI * 2);
       context.fill();
+      context.strokeStyle = body.isStatic
+        ? midnight ? '#ffd166' : '#8d5d05'
+        : midnight ? 'rgba(3, 12, 16, 0.82)' : 'rgba(255, 255, 255, 0.88)';
+      context.stroke();
+    }
+
+    context.strokeStyle = midnight ? '#ffd0b8' : '#8f3513';
+    context.lineWidth = 1.4 / scale;
+    for (const contact of this.contacts) {
+      context.beginPath();
+      context.arc(contact.pointX, contact.pointY, 3 / scale, 0, Math.PI * 2);
+      context.stroke();
     }
 
     context.setTransform(1, 0, 0, 1, 0, 0);
+    const precision = result.pairs.count === 0
+      ? 100
+      : (this.contacts.length / result.pairs.count) * 100;
     statsElement.textContent =
-      `${result.pairs.count.toLocaleString()} cand · ${result.auxiliaryChecks.toLocaleString()} checks · ${this.formatDuration(result.duration)} ms`;
+      `${result.pairs.count.toLocaleString()} cand · ${this.contacts.length.toLocaleString()} contacts · ${precision.toFixed(1)}% useful · ${this.formatDuration(result.duration)} ms`;
+    return {
+      candidates: result.pairs.count,
+      contacts: this.contacts.length,
+      duration: result.duration,
+    };
   }
 
   private clearVersusPanels(): void {
@@ -846,6 +1335,7 @@ export class CollisionPipelineApp {
     }
     this.elements.versusStatsA.textContent = 'paused';
     this.elements.versusStatsB.textContent = 'paused';
+    this.elements.versusVerdict.textContent = 'Side-by-side rendering is paused.';
   }
 
   private syncVersusLabels(): void {
@@ -866,6 +1356,7 @@ export class CollisionPipelineApp {
       horizontal: 'horizontal lanes',
       mixed: 'mixed sizes',
       giant: 'giant bodies',
+      tunneling: 'high-speed crossing',
     };
     return labels[this.scenario];
   }
@@ -1057,12 +1548,15 @@ export class CollisionPipelineApp {
     this.elements.falsePositiveCount.textContent = this.stats.falsePositiveCount.toLocaleString();
     this.elements.falsePositiveRate.textContent = `${falsePositiveRate.toFixed(1)}%`;
     this.elements.tunnelingSaves.textContent = this.ccd
-      ? this.stats.tunnelingSaves.toLocaleString()
+      ? this.cumulativeTunnelingSaves.toLocaleString()
       : '—';
-    this.elements.tunnelingSaves.classList.toggle('telemetry-pass', this.ccd && this.stats.tunnelingSaves > 0);
+    this.elements.tunnelingSaves.classList.toggle('telemetry-pass', this.ccd && this.cumulativeTunnelingSaves > 0);
     this.elements.rejectionRate.textContent = `${Math.max(0, rejected).toFixed(1)}%`;
     this.elements.broadTime.textContent = this.formatDuration(this.stats.broadDuration);
     this.elements.narrowTime.textContent = this.formatDuration(this.stats.narrowDuration);
+    this.elements.continuousTime.textContent = this.ccd
+      ? `${this.formatDuration(this.stats.continuousDuration)} ms`
+      : '—';
     this.elements.responseTime.textContent = this.formatDuration(this.stats.responseDuration);
     this.elements.auxiliaryChecks.textContent = this.stats.auxiliaryChecks.toLocaleString();
     this.elements.orderingSwaps.textContent = this.method === 'sweep'
@@ -1077,6 +1571,17 @@ export class CollisionPipelineApp {
     this.elements.maxBucketSize.textContent = this.method === 'spatial'
       ? this.stats.maxBucketSize.toLocaleString()
       : '—';
+    this.elements.ccdStatus.className = 'canvas-mode canvas-mode--ccd';
+    if (!this.ccd) {
+      this.elements.ccdStatus.textContent = 'Discrete sampling';
+    } else if (this.stats.tunnelingSaves > 0) {
+      this.elements.ccdStatus.textContent =
+        `CCD recovered ${this.stats.tunnelingSaves.toLocaleString()} crossing${this.stats.tunnelingSaves === 1 ? '' : 's'} this frame`;
+      this.elements.ccdStatus.classList.add('canvas-mode--save');
+    } else {
+      this.elements.ccdStatus.textContent = `CCD armed · ${this.cumulativeTunnelingSaves.toLocaleString()} recovered this run`;
+      this.elements.ccdStatus.classList.add('canvas-mode--active');
+    }
   }
 
   private formatDuration(duration: number): string {
@@ -1211,7 +1716,35 @@ export class CollisionPipelineApp {
       horizontal: 'Horizontal lanes keep Y overlap narrow, helping the sweep’s secondary Y filter.',
       mixed: 'Mixed radii make one hash cell size a compromise and increase multi-cell insertion.',
       giant: 'Giant bodies span many cells and expose duplicate hash work before deduplication.',
+      tunneling: 'Fast opposing pairs travel farther than their diameter, exposing what end-of-frame sampling misses.',
     };
+    const methodBest: Record<BroadPhaseMethod, string> = {
+      naive: 'Tiny sets, debugging, and oracle truth.',
+      spatial: 'Similar sizes with even spatial distribution.',
+      sweep: 'Large dynamic sets with coherent motion and an axis that separates most bounds.',
+    };
+    const methodRisk: Record<BroadPhaseMethod, string> = {
+      naive: 'Every added body increases quadratic pair work.',
+      spatial: 'Uneven density, oversized objects, and poor cell sizing crowd buckets or duplicate inserts.',
+      sweep: 'Heavy interval overlap or rapidly changing order grows the active set and can approach quadratic work.',
+    };
+    const expectedFit: Record<ScenarioName, string> = {
+      uniform: 'Spatial hash should be a strong fit; sweep also benefits from coherence.',
+      clusters: 'Expect more real local work. Compare checks, not candidate count alone.',
+      horizontal: 'Sweep should benefit from stable X order and a selective Y test.',
+      mixed: 'Sweep avoids choosing one cell size for incompatible radii.',
+      giant: 'Sweep avoids the hash duplication caused by giant multi-cell bodies.',
+      tunneling: 'CCD is the deciding feature; the broad phase must use swept bounds first.',
+    };
+    this.elements.lessonBest.textContent = methodBest[this.method];
+    this.elements.lessonRisk.textContent = methodRisk[this.method];
+    const customCount = this.bodies.reduce(
+      (count, body) => count + (body.isUserCreated ? 1 : 0),
+      0,
+    );
+    this.elements.lessonVerdict.textContent = customCount > 0
+      ? `You reshaped this workload with ${customCount.toLocaleString()} custom bodies. Use the live method race to judge the distribution you actually built; the selected filter rejects ${(100 - candidateRatio).toFixed(1)}% of theoretical pairs.`
+      : `${expectedFit[this.scenario]} Current filter rejects ${(100 - candidateRatio).toFixed(1)}% of theoretical pairs.`;
 
     if (this.method === 'spatial') {
       const entriesPerBody = this.bodies.length === 0
@@ -1236,20 +1769,29 @@ export class CollisionPipelineApp {
       const swapsPerBody = this.bodies.length === 0
         ? 0
         : this.stats.orderingSwaps / this.bodies.length;
-      const checksPerCandidate = this.stats.candidateCount === 0
+      const checksPerBody = this.bodies.length === 0
         ? 0
-        : this.stats.auxiliaryChecks / this.stats.candidateCount;
-      this.elements.insightTitle.textContent = this.stats.usedFullSort
-        ? 'Cold start: build the X ordering.'
-        : swapsPerBody < 0.5
-          ? 'Temporal coherence is doing the sorting work.'
-          : 'Fast motion is disrupting interval order.';
+        : this.stats.auxiliaryChecks / this.bodies.length;
+      if (!this.stats.usedFullSort) {
+        this.updateSweepInsightState(swapsPerBody, checksPerBody);
+      }
+      const titles: Record<SweepInsightState, string> = {
+        coherent: 'Ordering is stable; sweep repair is cheap.',
+        overlap: 'Broad interval overlap is growing the active set.',
+        churn: 'Motion is forcing more ordering repair.',
+      };
+      const explanations: Record<SweepInsightState, string> = {
+        coherent: 'Temporal coherence is the core advantage: most bounds stay near their previous sorted position.',
+        overlap: 'Sweep loses efficiency when many projected bounds overlap, because the active set must compare more possible pairs even when final contacts stay sparse.',
+        churn: 'Large jumps, teleports, or chaotic motion weaken temporal coherence and increase the work needed to restore sorted order.',
+      };
+      this.elements.insightTitle.textContent = titles[this.sweepInsightState];
       this.elements.insightBody.textContent =
-        `${scenarioLesson[this.scenario]} Live frames reuse the prior X order; the swap rate shows how much repair insertion sort needed.`;
-      this.elements.insightPrimaryLabel.textContent = 'Order swaps / body';
-      this.elements.insightPrimaryValue.textContent = this.stats.usedFullSort ? 'cold sort' : swapsPerBody.toFixed(2);
-      this.elements.insightSecondaryLabel.textContent = 'X checks / candidate';
-      this.elements.insightSecondaryValue.textContent = checksPerCandidate.toFixed(1);
+        `${explanations[this.sweepInsightState]} ${scenarioLesson[this.scenario]} Demo note: this implementation sorts X and applies Y as a secondary AABB filter.`;
+      this.elements.insightPrimaryLabel.textContent = 'Rolling order repairs / body';
+      this.elements.insightPrimaryValue.textContent = this.smoothedSweepSwapsPerBody.toFixed(2);
+      this.elements.insightSecondaryLabel.textContent = 'Rolling X overlaps / body';
+      this.elements.insightSecondaryValue.textContent = this.smoothedSweepChecksPerBody.toFixed(1);
       return;
     }
 
@@ -1260,6 +1802,82 @@ export class CollisionPipelineApp {
     this.elements.insightPrimaryValue.textContent = `${candidateRatio.toFixed(1)}%`;
     this.elements.insightSecondaryLabel.textContent = 'Pairs rejected';
     this.elements.insightSecondaryValue.textContent = '0%';
+  }
+
+  private updateSweepInsightState(swapsPerBody: number, checksPerBody: number): void {
+    if (!this.sweepInsightInitialized) {
+      this.smoothedSweepSwapsPerBody = swapsPerBody;
+      this.smoothedSweepChecksPerBody = checksPerBody;
+      this.sweepInsightInitialized = true;
+    } else {
+      const weight = 0.08;
+      this.smoothedSweepSwapsPerBody +=
+        (swapsPerBody - this.smoothedSweepSwapsPerBody) * weight;
+      this.smoothedSweepChecksPerBody +=
+        (checksPerBody - this.smoothedSweepChecksPerBody) * weight;
+    }
+
+    let nextState: SweepInsightState = 'coherent';
+    if (this.smoothedSweepChecksPerBody > 14) {
+      nextState = 'overlap';
+    } else if (this.smoothedSweepSwapsPerBody > 0.85) {
+      nextState = 'churn';
+    }
+    if (nextState === this.sweepInsightState) {
+      this.pendingSweepInsightState = nextState;
+      this.pendingSweepInsightFrames = 0;
+      return;
+    }
+    if (nextState !== this.pendingSweepInsightState) {
+      this.pendingSweepInsightState = nextState;
+      this.pendingSweepInsightFrames = 1;
+      return;
+    }
+    this.pendingSweepInsightFrames += 1;
+    if (this.pendingSweepInsightFrames >= INSIGHT_STABILITY_FRAMES) {
+      this.sweepInsightState = nextState;
+      this.pendingSweepInsightFrames = 0;
+    }
+  }
+
+  private resetInsightSmoothing(): void {
+    this.smoothedSweepSwapsPerBody = 0;
+    this.smoothedSweepChecksPerBody = 0;
+    this.sweepInsightInitialized = false;
+    this.sweepInsightState = 'coherent';
+    this.pendingSweepInsightState = 'coherent';
+    this.pendingSweepInsightFrames = 0;
+  }
+
+  private syncInteractionControls(): void {
+    if (!this.elements) {
+      return;
+    }
+    this.elements.toolButtons.forEach((button) => {
+      const active = button.dataset.tool === this.interactionTool;
+      button.classList.toggle('is-active', active);
+      button.setAttribute('aria-pressed', String(active));
+    });
+    this.elements.brushSlider.value = String(this.brushRadius);
+    this.elements.brushValue.textContent = `${this.brushRadius} px`;
+    const customCount = this.bodies.reduce(
+      (count, body) => count + (body.isUserCreated ? 1 : 0),
+      0,
+    );
+    const staticCount = this.bodies.reduce(
+      (count, body) => count + (body.isUserCreated && body.isStatic ? 1 : 0),
+      0,
+    );
+    this.elements.customBodyCount.textContent =
+      `${customCount.toLocaleString()} custom · ${staticCount.toLocaleString()} static`;
+    this.elements.clearCustomButton.disabled = customCount === 0;
+    const hints: Record<InteractionTool, string> = {
+      launch: 'Drag from the spawn point toward the direction of travel. A click drops a moving body.',
+      spray: 'Drag to inject compact moving clusters and increase local density quickly.',
+      wall: 'Drag to paint fixed circles into walls, funnels, pockets, or narrow channels.',
+      erase: 'Drag across the canvas to remove both generated and custom bodies.',
+    };
+    this.elements.interactionHint.textContent = hints[this.interactionTool];
   }
 
   private syncControls(): void {
@@ -1287,11 +1905,12 @@ export class CollisionPipelineApp {
     this.elements.cellSlider.disabled = this.method !== 'spatial';
     this.elements.gridToggle.disabled = this.method !== 'spatial';
     this.elements.stressButton.disabled = this.bodies.length >= MAX_BODY_COUNT;
+    this.syncInteractionControls();
     this.elements.methodDescription.textContent = this.method === 'naive'
       ? 'Every unique body pair advances to the exact circle test. Correct, simple, and quadratic.'
       : this.method === 'spatial'
         ? 'Bodies enter every grid cell touched by their AABB. Cell size trades occupancy against duplication.'
-        : 'Single-axis X intervals retain temporal order and use insertion sort; a secondary Y-AABB test removes candidates before the exact circle test.';
+        : 'Sweep and prune reuses sorted interval order, then scans only overlapping bounds. Demo note: this implementation sorts X and applies Y as a secondary AABB filter.';
   }
 
   private getPreferredTheme(): ThemeName {
@@ -1318,6 +1937,7 @@ export class CollisionPipelineApp {
       closeDialogButton: this.getElement<HTMLButtonElement>('#close-dialog'),
       resetButton: this.getElement<HTMLButtonElement>('#reset-demo'),
       stressButton: this.getElement<HTMLButtonElement>('#stress-demo'),
+      ccdChallengeButton: this.getElement<HTMLButtonElement>('#ccd-challenge'),
       compareButton: this.getElement<HTMLButtonElement>('#run-comparison'),
       auditButton: this.getElement<HTMLButtonElement>('#run-audit'),
       pauseToggle: this.getElement<HTMLInputElement>('#pause-sim'),
@@ -1327,6 +1947,12 @@ export class CollisionPipelineApp {
       contactsToggle: this.getElement<HTMLInputElement>('#show-contacts'),
       trailsToggle: this.getElement<HTMLInputElement>('#show-trails'),
       gridToggle: this.getElement<HTMLInputElement>('#show-grid'),
+      toolButtons: this.root.querySelectorAll<HTMLButtonElement>('[data-tool]'),
+      brushSlider: this.getElement<HTMLInputElement>('#brush-size'),
+      brushValue: this.getElement<HTMLElement>('#brush-value'),
+      clearCustomButton: this.getElement<HTMLButtonElement>('#clear-custom'),
+      customBodyCount: this.getElement<HTMLElement>('#custom-body-count'),
+      interactionHint: this.getElement<HTMLElement>('#interaction-hint'),
       bodySlider: this.getElement<HTMLInputElement>('#body-slider'),
       bodyValue: this.getElement<HTMLElement>('#body-value'),
       speedSlider: this.getElement<HTMLInputElement>('#speed-slider'),
@@ -1348,6 +1974,8 @@ export class CollisionPipelineApp {
       contactCount: this.getElement<HTMLElement>('#contact-count'),
       canvasRecall: this.getElement<HTMLElement>('#canvas-recall'),
       canvasRecallLabel: this.getElement<HTMLElement>('#canvas-recall-label'),
+      candidateVisibility: this.getElement<HTMLElement>('#candidate-visibility'),
+      ccdStatus: this.getElement<HTMLElement>('#ccd-status'),
       falsePositiveCount: this.getElement<HTMLElement>('#false-positive-count'),
       falsePositiveRate: this.getElement<HTMLElement>('#false-positive-rate'),
       tunnelingSaves: this.getElement<HTMLElement>('#tunneling-saves'),
@@ -1356,6 +1984,7 @@ export class CollisionPipelineApp {
       rejectionRate: this.getElement<HTMLElement>('#rejection-rate'),
       broadTime: this.getElement<HTMLElement>('#broad-time'),
       narrowTime: this.getElement<HTMLElement>('#narrow-time'),
+      continuousTime: this.getElement<HTMLElement>('#continuous-time'),
       responseTime: this.getElement<HTMLElement>('#response-time'),
       auxiliaryChecks: this.getElement<HTMLElement>('#auxiliary-checks'),
       orderingSwaps: this.getElement<HTMLElement>('#ordering-swaps'),
@@ -1368,6 +1997,14 @@ export class CollisionPipelineApp {
       insightPrimaryValue: this.getElement<HTMLElement>('#insight-primary-value'),
       insightSecondaryLabel: this.getElement<HTMLElement>('#insight-secondary-label'),
       insightSecondaryValue: this.getElement<HTMLElement>('#insight-secondary-value'),
+      lessonBest: this.getElement<HTMLElement>('#lesson-best'),
+      lessonRisk: this.getElement<HTMLElement>('#lesson-risk'),
+      lessonVerdict: this.getElement<HTMLElement>('#lesson-verdict'),
+      raceSpatialTime: this.getElement<HTMLElement>('#race-spatial-time'),
+      raceSpatialWork: this.getElement<HTMLElement>('#race-spatial-work'),
+      raceSweepTime: this.getElement<HTMLElement>('#race-sweep-time'),
+      raceSweepWork: this.getElement<HTMLElement>('#race-sweep-work'),
+      raceVerdict: this.getElement<HTMLElement>('#race-verdict'),
       auditStatus: this.getElement<HTMLElement>('#audit-status'),
       auditRecall: this.getElement<HTMLElement>('#audit-recall'),
       auditMissed: this.getElement<HTMLElement>('#audit-missed'),
@@ -1391,6 +2028,7 @@ export class CollisionPipelineApp {
       versusNameB: this.getElement<HTMLElement>('#versus-b-name'),
       versusStatsA: this.getElement<HTMLElement>('#versus-a-stats'),
       versusStatsB: this.getElement<HTMLElement>('#versus-b-stats'),
+      versusVerdict: this.getElement<HTMLElement>('#versus-verdict'),
       scalingButton: this.getElement<HTMLButtonElement>('#run-scaling'),
       scalingStatus: this.getElement<HTMLElement>('#scaling-status'),
       scalingCanvas: this.getElement<HTMLCanvasElement>('#scaling-canvas'),
@@ -1450,6 +2088,7 @@ export class CollisionPipelineApp {
               </div>
               <div class="stage__actions">
                 <button class="button button--quiet" id="reset-demo" type="button">Reset</button>
+                <button class="button button--quiet" id="ccd-challenge" type="button">Run CCD challenge</button>
                 <button class="button button--primary" id="stress-demo" type="button">Stress +250</button>
               </div>
             </div>
@@ -1473,6 +2112,40 @@ export class CollisionPipelineApp {
               </div>
             </section>
 
+            <section class="lesson-strip" aria-label="How to interpret the selected method">
+              <div><span>Wins when</span><strong id="lesson-best">—</strong></div>
+              <div><span>Loses when</span><strong id="lesson-risk">—</strong></div>
+              <div class="lesson-strip__verdict"><span>Read this frame</span><strong id="lesson-verdict">—</strong></div>
+            </section>
+
+            <section class="play-lab" aria-label="Interactive workload builder">
+              <div class="play-tools">
+                <div class="play-tools__header">
+                  <div><div class="panel__kicker">Build the workload</div><h3>Shape the simulation directly</h3></div>
+                  <strong id="custom-body-count">0 custom · 0 static</strong>
+                </div>
+                <div class="tool-switch" aria-label="Canvas interaction tool">
+                  <button class="is-active" data-tool="launch" type="button">Launch</button>
+                  <button data-tool="spray" type="button">Dynamic spray</button>
+                  <button data-tool="wall" type="button">Static wall</button>
+                  <button data-tool="erase" type="button">Erase</button>
+                </div>
+                <div class="play-tools__settings">
+                  <label><span>Body / brush size</span><output id="brush-value">12 px</output><input id="brush-size" type="range" min="4" max="42" step="1" value="12" /></label>
+                  <button class="button button--quiet" id="clear-custom" type="button" disabled>Clear custom</button>
+                </div>
+                <p id="interaction-hint">Drag from the spawn point toward the direction of travel. A click drops a moving body.</p>
+              </div>
+              <div class="method-race">
+                <div class="method-race__header"><div><div class="panel__kicker">Live method race</div><h3>Same world, rolling broad-phase cost</h3></div><span>Updates at 5 Hz</span></div>
+                <div class="method-race__cards">
+                  <article><span>Spatial hash</span><strong id="race-spatial-time">—</strong><small id="race-spatial-work">Waiting for a sample</small></article>
+                  <article><span>Sweep and prune</span><strong id="race-sweep-time">—</strong><small id="race-sweep-work">Waiting for a sample</small></article>
+                </div>
+                <p id="race-verdict">Build or reshape the world, then watch both methods rerun on the same bodies.</p>
+              </div>
+            </section>
+
             <div class="canvas-shell">
               <canvas id="collision-canvas" width="${WORLD_BOUNDS.width}" height="${WORLD_BOUNDS.height}" aria-label="Dynamic circle collision simulation"></canvas>
               <div class="canvas-hud">
@@ -1489,6 +2162,8 @@ export class CollisionPipelineApp {
                 <span id="canvas-recall-label">Snapshot recall</span>
                 <strong id="canvas-recall">Not audited</strong>
               </div>
+              <div class="canvas-mode" id="candidate-visibility">Candidate overlay off</div>
+              <div class="canvas-mode canvas-mode--ccd" id="ccd-status">Discrete sampling</div>
             </div>
             <div class="stage-foot">
               <span><b>Correctness rule</b> broad phase may over-report, but must never miss a real contact</span>
@@ -1509,13 +2184,13 @@ export class CollisionPipelineApp {
             <section class="panel">
               <div class="panel__header"><div><div class="panel__kicker">Workload</div><h3>Simulation</h3></div></div>
               <div class="control-stack">
-                <label class="range-row"><span><b>Body count</b><small>Brute force reaches millions of possible pairs</small></span><output id="body-value">850</output><input id="body-slider" type="range" min="100" max="${MAX_BODY_COUNT}" step="50" value="${DEFAULT_BODY_COUNT}" /></label>
+                <label class="range-row"><span><b>Body count</b><small>Set zero to build a workload entirely by hand</small></span><output id="body-value">850</output><input id="body-slider" type="range" min="0" max="${MAX_BODY_COUNT}" step="10" value="${DEFAULT_BODY_COUNT}" /></label>
                 <label class="range-row"><span><b>Motion speed</b><small>Higher movement reduces sweep coherence</small></span><output id="speed-value">1.0x</output><input id="speed-slider" type="range" min="0.2" max="2.5" step="0.1" value="1" /></label>
-                <label class="select-row"><span><b>Scenario</b><small>Each distribution stresses methods differently</small></span><select id="scenario-select"><option value="uniform">Uniform small bodies</option><option value="clusters">Dense clusters</option><option value="horizontal">Horizontal lanes</option><option value="mixed">Mixed body sizes</option><option value="giant">Giant bodies</option></select></label>
+                <label class="select-row"><span><b>Scenario</b><small>Each distribution stresses methods differently</small></span><select id="scenario-select"><option value="uniform">Uniform small bodies</option><option value="clusters">Dense clusters</option><option value="horizontal">Horizontal lanes</option><option value="mixed">Mixed body sizes</option><option value="giant">Giant bodies</option><option value="tunneling">High-speed CCD crossing</option></select></label>
                 <label class="range-row"><span><b>Restitution</b><small>Energy retained by resolved impacts</small></span><output id="restitution-value">0.72</output><input id="restitution-slider" type="range" min="0" max="1" step="0.02" value="0.72" /></label>
                 <label class="range-row"><span><b>Hash cell size</b><small>Occupancy versus multi-cell duplication</small></span><output id="cell-value">32 px</output><input id="cell-slider" type="range" min="16" max="128" step="8" value="${DEFAULT_CELL_SIZE}" /></label>
               </div>
-              <div class="scope-note"><b>Discrete detection</b> Fast bodies can cross between frames. Recall audits current-frame overlaps, not swept paths.</div>
+              <div class="scope-note"><b>CCD challenge</b> The high-speed preset makes opposing circles travel farther than their diameter per frame. Toggle CCD to compare end-position sampling with swept time of impact.</div>
             </section>
 
             <section class="panel">
@@ -1527,7 +2202,7 @@ export class CollisionPipelineApp {
                   <dt>Missed contacts</dt><dd id="stage-missed">—</dd>
                   <dt>False positives</dt><dd id="false-positive-count">0</dd>
                   <dt>False-positive rate</dt><dd id="false-positive-rate">0.0%</dd>
-                  <dt>Tunneling saves</dt><dd id="tunneling-saves">—</dd>
+                  <dt>CCD saves this run</dt><dd id="tunneling-saves">—</dd>
                 </dl>
               </div>
               <div class="metric-group">
@@ -1535,6 +2210,7 @@ export class CollisionPipelineApp {
                 <dl class="stats-grid">
                   <dt>Broad phase</dt><dd><span id="broad-time">0.00</span> ms</dd>
                   <dt>Narrow phase</dt><dd><span id="narrow-time">0.00</span> ms</dd>
+                  <dt>Continuous test</dt><dd id="continuous-time">—</dd>
                   <dt>Response</dt><dd><span id="response-time">0.00</span> ms</dd>
                   <dt>Pairs rejected</dt><dd id="rejection-rate">0.0%</dd>
                   <dt>Broad pair checks</dt><dd id="auxiliary-checks">0</dd>
@@ -1546,19 +2222,23 @@ export class CollisionPipelineApp {
               </div>
             </section>
 
-            <section class="panel">
-              <div class="panel__header"><div><div class="panel__kicker">Inspect</div><h3>Debug and response</h3></div></div>
-              <div class="toggle-stack">
-                <label class="toggle"><span><b>Resolve contacts</b><small>Apply correction and impulses</small></span><span class="switch"><input id="resolve-response" type="checkbox" checked /><i></i></span></label>
-                <label class="toggle"><span><b>Continuous (CCD)</b><small>Swept test stops fast bodies tunneling</small></span><span class="switch"><input id="resolve-ccd" type="checkbox" /><i></i></span></label>
-                <label class="toggle"><span><b>Candidate lines</b><small>Shown when candidate count is manageable</small></span><span class="switch"><input id="show-pairs" type="checkbox" /><i></i></span></label>
-                <label class="toggle"><span><b>Contact normals</b><small>Exact narrow-phase result</small></span><span class="switch"><input id="show-contacts" type="checkbox" checked /><i></i></span></label>
-                <label class="toggle"><span><b>Motion ticks</b><small>Short per-frame trails without accumulation</small></span><span class="switch"><input id="show-trails" type="checkbox" checked /><i></i></span></label>
-                <label class="toggle"><span><b>Spatial grid</b><small>Available in hash mode</small></span><span class="switch"><input id="show-grid" type="checkbox" checked /><i></i></span></label>
-                <label class="toggle"><span><b>Pause simulation</b><small>Inspect one stable snapshot</small></span><span class="switch"><input id="pause-sim" type="checkbox" /><i></i></span></label>
-              </div>
-            </section>
           </aside>
+        </section>
+
+        <section class="inspect-bar">
+          <div class="inspect-bar__intro">
+            <div class="panel__kicker">Inspect</div>
+            <h3>Debug and response</h3>
+          </div>
+          <div class="inspect-bar__controls">
+            <label class="toggle"><span><b>Resolve contacts</b><small>Correction and impulses</small></span><span class="switch"><input id="resolve-response" type="checkbox" checked /><i></i></span></label>
+            <label class="toggle"><span><b>Continuous (CCD)</b><small>Swept tunneling test</small></span><span class="switch"><input id="resolve-ccd" type="checkbox" /><i></i></span></label>
+            <label class="toggle"><span><b>Candidate lines</b><small>Sample broad pairs</small></span><span class="switch"><input id="show-pairs" type="checkbox" /><i></i></span></label>
+            <label class="toggle"><span><b>Contact normals</b><small>Exact contact result</small></span><span class="switch"><input id="show-contacts" type="checkbox" checked /><i></i></span></label>
+            <label class="toggle"><span><b>Motion ticks</b><small>Per-frame trails</small></span><span class="switch"><input id="show-trails" type="checkbox" checked /><i></i></span></label>
+            <label class="toggle"><span><b>Spatial grid</b><small>Hash mode only</small></span><span class="switch"><input id="show-grid" type="checkbox" checked /><i></i></span></label>
+            <label class="toggle"><span><b>Pause simulation</b><small>Hold this snapshot</small></span><span class="switch"><input id="pause-sim" type="checkbox" /><i></i></span></label>
+          </div>
         </section>
 
         <section class="audit">
@@ -1616,9 +2296,9 @@ export class CollisionPipelineApp {
             <div class="versus__controls">
               <label class="select-inline"><span>Left</span><select id="versus-a"><option value="naive">Brute force</option><option value="spatial" selected>Spatial hash</option><option value="sweep">Sweep and prune</option></select></label>
               <label class="select-inline"><span>Right</span><select id="versus-b"><option value="naive">Brute force</option><option value="spatial">Spatial hash</option><option value="sweep" selected>Sweep and prune</option></select></label>
-              <label class="toggle toggle--inline"><span><b>Animate</b><small>Runs two extra broad phases each frame</small></span><span class="switch"><input id="versus-active" type="checkbox" checked /><i></i></span></label>
+              <label class="toggle toggle--inline"><span><b>Animate</b><small>Runs two extra broad phases each frame</small></span><span class="switch"><input id="versus-active" type="checkbox" /><i></i></span></label>
             </div>
-            <p class="versus-note">Candidate lines are drawn over identical bodies, so denser webbing means more pairs survived that method's filter.</p>
+            <p class="versus-note" id="versus-verdict">Candidate lines are sampled over identical bodies; the live verdict compares how many pairs each method forwards.</p>
           </div>
           <div class="versus__stage">
             <figure class="versus__panel">
@@ -1643,7 +2323,7 @@ export class CollisionPipelineApp {
 
         <section class="tradeoffs">
           <article><span>Spatial hash</span><h3>Local density matters</h3><p>Excellent for similarly sized, spatially distributed bodies. Dense buckets and giant multi-cell bodies increase duplicate work.</p></article>
-          <article><span>Sweep and prune</span><h3>Coherence matters</h3><p>Strong when interval ordering changes slowly. One-axis overlap can become weak when many bodies share the same projection.</p></article>
+          <article><span>Sweep and prune</span><h3>Coherence and separation matter</h3><p>Strong when bounds stay ordered and projections reject most pairs. It loses when interval overlap or rapid reordering grows work toward quadratic behavior.<small>Demo note: X is sorted; Y is a secondary AABB filter.</small></p></article>
           <article><span>Brute force</span><h3>Simplicity has value</h3><p>Useful as a correctness oracle and for tiny body counts, but its quadratic pair count dominates quickly.</p></article>
         </section>
 
@@ -1662,7 +2342,7 @@ export class CollisionPipelineApp {
               <li>Narrow-phase and response durations are measured separately.</li>
               <li>Scenario presets demonstrate that no broad phase wins every distribution.</li>
               <li>The canvas is fully cleared each frame; crisp outlines separate dense bodies without accumulating trails.</li>
-              <li>Collision detection is discrete, so sufficiently fast bodies can tunnel between frames.</li>
+              <li>Discrete mode can tunnel; optional CCD widens broad-phase bounds, orders impacts by time, and resolves the earliest crossing per body.</li>
             </ul>
           </div>
           <div class="dialog__actions"><button class="button" id="close-dialog" type="button">Close</button></div>

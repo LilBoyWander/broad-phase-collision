@@ -12,7 +12,14 @@ import { candidateKeys, missedContacts, oracleContactKeys } from './oracle';
  * oracle across every scenario, body count, and several simulated frames, and demands zero missed contacts everywhere.
  */
 
-const SCENARIOS: ScenarioName[] = ['uniform', 'clusters', 'horizontal', 'mixed', 'giant'];
+const SCENARIOS: ScenarioName[] = [
+  'uniform',
+  'clusters',
+  'horizontal',
+  'mixed',
+  'giant',
+  'tunneling',
+];
 const BODY_COUNTS = [150, 700];
 const FRAMES = 24;
 const CELL_SIZE = 32;

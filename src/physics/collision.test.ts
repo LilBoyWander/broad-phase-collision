@@ -60,6 +60,14 @@ describe('detectContacts', () => {
     ];
     expect(detectContacts(bodies, bufferOf([0, 1])).contacts).toHaveLength(0);
   });
+
+  it('does not report fixed geometry against fixed geometry as an actionable contact', () => {
+    const bodies = [
+      makeBody({ x: 0, y: 0, radius: 10, inverseMass: 0, isStatic: true }),
+      makeBody({ x: 5, y: 0, radius: 10, inverseMass: 0, isStatic: true }),
+    ];
+    expect(detectContacts(bodies, bufferOf([0, 1])).contacts).toHaveLength(0);
+  });
 });
 
 describe('resolveContacts', () => {
@@ -101,6 +109,26 @@ describe('resolveContacts', () => {
     resolveContacts(bodies, contacts, 0.8);
     const momentumAfter = bodies[0].mass * bodies[0].velocityX + bodies[1].mass * bodies[1].velocityX;
     expect(momentumAfter).toBeCloseTo(momentumBefore, 6);
+  });
+
+  it('bounces a moving body without moving static geometry', () => {
+    const bodies = [
+      makeBody({
+        id: 0,
+        x: 0,
+        y: 0,
+        radius: 12,
+        mass: Number.POSITIVE_INFINITY,
+        inverseMass: 0,
+        isStatic: true,
+      }),
+      makeBody({ id: 1, x: 18, y: 0, radius: 10, velocityX: -60 }),
+    ];
+    const contacts = detectContacts(bodies, bufferOf([0, 1])).contacts;
+    resolveContacts(bodies, contacts, 0.8);
+    expect(bodies[0].x).toBe(0);
+    expect(bodies[0].velocityX).toBe(0);
+    expect(bodies[1].velocityX).toBeGreaterThan(0);
   });
 });
 

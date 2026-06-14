@@ -60,6 +60,7 @@ export function resolveTunneling(
   const contacts: Contact[] = [];
   const clamped = new Set<number>();
   const alreadyContacting = new Set<number>();
+  const impacts: Array<{ firstIndex: number; secondIndex: number; time: number }> = [];
   for (const contact of discreteContacts) {
     alreadyContacting.add(pairKey(contact.a, contact.b, bodies.length));
   }
@@ -70,9 +71,6 @@ export function resolveTunneling(
     if (alreadyContacting.has(pairKey(firstIndex, secondIndex, bodies.length))) {
       continue;
     }
-    if (clamped.has(firstIndex) || clamped.has(secondIndex)) {
-      continue;
-    }
 
     const first = bodies[firstIndex];
     const second = bodies[secondIndex];
@@ -80,11 +78,24 @@ export function resolveTunneling(
     if (impact === null) {
       continue;
     }
+    impacts.push({ firstIndex, secondIndex, time: impact });
+  }
 
-    first.x = first.previousX + (first.x - first.previousX) * impact;
-    first.y = first.previousY + (first.y - first.previousY) * impact;
-    second.x = second.previousX + (second.x - second.previousX) * impact;
-    second.y = second.previousY + (second.y - second.previousY) * impact;
+  // Candidate order is an implementation detail. Resolve chronologically so a body crossing multiple objects is
+  // clamped to its earliest impact rather than whichever pair happened to be emitted first.
+  impacts.sort((first, second) => first.time - second.time);
+  for (const impact of impacts) {
+    const { firstIndex, secondIndex, time } = impact;
+    if (clamped.has(firstIndex) || clamped.has(secondIndex)) {
+      continue;
+    }
+
+    const first = bodies[firstIndex];
+    const second = bodies[secondIndex];
+    first.x = first.previousX + (first.x - first.previousX) * time;
+    first.y = first.previousY + (first.y - first.previousY) * time;
+    second.x = second.previousX + (second.x - second.previousX) * time;
+    second.y = second.previousY + (second.y - second.previousY) * time;
     clamped.add(firstIndex);
     clamped.add(secondIndex);
 

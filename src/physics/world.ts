@@ -14,6 +14,41 @@ function createRandom(seed: number): () => number {
   };
 }
 
+interface BodyOptions {
+  id: number;
+  x: number;
+  y: number;
+  radius: number;
+  velocityX?: number;
+  velocityY?: number;
+  colorIndex?: number;
+  isStatic?: boolean;
+  isUserCreated?: boolean;
+}
+
+export function createBody(options: BodyOptions): Body {
+  const radius = Math.max(2, Math.min(80, options.radius));
+  const x = Math.max(radius, Math.min(WORLD_WIDTH - radius, options.x));
+  const y = Math.max(radius, Math.min(WORLD_HEIGHT - radius, options.y));
+  const mass = options.isStatic ? Number.POSITIVE_INFINITY : Math.PI * radius * radius;
+  return {
+    id: options.id,
+    x,
+    y,
+    previousX: x,
+    previousY: y,
+    velocityX: options.isStatic ? 0 : options.velocityX ?? 0,
+    velocityY: options.isStatic ? 0 : options.velocityY ?? 0,
+    radius,
+    mass,
+    inverseMass: options.isStatic ? 0 : 1 / mass,
+    colorIndex: options.colorIndex ?? 0,
+    contactFrames: 0,
+    isStatic: options.isStatic,
+    isUserCreated: options.isUserCreated,
+  };
+}
+
 /**
  * Generates repeatable distributions that expose different broad-phase strengths and weaknesses.
  */
@@ -54,25 +89,28 @@ export function createBodies(count: number, scenario: ScenarioName): Body[] {
       y = radius + random() * (WORLD_HEIGHT - radius * 2);
       velocityX *= 0.28;
       velocityY *= 0.28;
+    } else if (scenario === 'tunneling') {
+      const pairCount = Math.max(1, Math.ceil(count / 2));
+      const pairIndex = Math.floor(index / 2);
+      const laneProgress = pairCount === 1 ? 0.5 : pairIndex / (pairCount - 1);
+      radius = 5;
+      y = 28 + laneProgress * (WORLD_HEIGHT - 56);
+      x = index % 2 === 0 ? 180 : WORLD_WIDTH - 180;
+      velocityX = index % 2 === 0 ? 880 : -880;
+      velocityY = 0;
     }
 
     x = Math.max(radius, Math.min(WORLD_WIDTH - radius, x));
     y = Math.max(radius, Math.min(WORLD_HEIGHT - radius, y));
-    const mass = Math.PI * radius * radius;
-    bodies.push({
+    bodies.push(createBody({
       id: index,
       x,
       y,
-      previousX: x,
-      previousY: y,
       velocityX,
       velocityY,
       radius,
-      mass,
-      inverseMass: 1 / mass,
       colorIndex: Math.floor(random() * 3),
-      contactFrames: 0,
-    });
+    }));
   }
 
   return bodies;
@@ -86,6 +124,12 @@ export function updateBodies(
   for (const body of bodies) {
     body.previousX = body.x;
     body.previousY = body.y;
+    if (body.isStatic || body.inverseMass === 0) {
+      body.velocityX = 0;
+      body.velocityY = 0;
+      body.contactFrames = Math.max(0, body.contactFrames - 1);
+      continue;
+    }
     body.x += body.velocityX * deltaTime * speedMultiplier;
     body.y += body.velocityY * deltaTime * speedMultiplier;
 

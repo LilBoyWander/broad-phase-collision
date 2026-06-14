@@ -1,8 +1,15 @@
 import { describe, it, expect } from 'vitest';
-import { createBodies, updateBodies, WORLD_BOUNDS } from './world';
+import { createBodies, createBody, updateBodies, WORLD_BOUNDS } from './world';
 import type { ScenarioName } from './types';
 
-const SCENARIOS: ScenarioName[] = ['uniform', 'clusters', 'horizontal', 'mixed', 'giant'];
+const SCENARIOS: ScenarioName[] = [
+  'uniform',
+  'clusters',
+  'horizontal',
+  'mixed',
+  'giant',
+  'tunneling',
+];
 
 describe('createBodies', () => {
   it('is deterministic for the same count and scenario', () => {
@@ -67,5 +74,32 @@ describe('updateBodies', () => {
     updateBodies(bodies, 1 / 60, 1);
     expect(body.previousX).toBe(480);
     expect(body.x).toBeGreaterThan(480);
+  });
+
+  it('keeps static user geometry fixed', () => {
+    const body = createBody({
+      id: 1,
+      x: 200,
+      y: 150,
+      radius: 18,
+      velocityX: 400,
+      isStatic: true,
+      isUserCreated: true,
+    });
+    updateBodies([body], 1 / 30, 2);
+    expect(body.x).toBe(200);
+    expect(body.y).toBe(150);
+    expect(body.inverseMass).toBe(0);
+    expect(body.velocityX).toBe(0);
+  });
+});
+
+describe('tunneling scenario', () => {
+  it('creates opposing high-speed pairs on separate lanes', () => {
+    const bodies = createBodies(48, 'tunneling');
+    expect(bodies[0].velocityX).toBeGreaterThan(800);
+    expect(bodies[1].velocityX).toBeLessThan(-800);
+    expect(bodies[0].y).toBe(bodies[1].y);
+    expect(bodies[2].y).toBeGreaterThan(bodies[0].y);
   });
 });

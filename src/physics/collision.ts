@@ -20,6 +20,9 @@ export function detectContacts(bodies: Body[], pairs: PairBuffer): NarrowPhaseRe
     const secondIndex = pairs.getSecond(pairIndex);
     const first = bodies[firstIndex];
     const second = bodies[secondIndex];
+    if (first.inverseMass === 0 && second.inverseMass === 0) {
+      continue;
+    }
     const deltaX = second.x - first.x;
     const deltaY = second.y - first.y;
     const radiusSum = first.radius + second.radius;

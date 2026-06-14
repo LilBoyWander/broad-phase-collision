@@ -11,6 +11,8 @@ export interface Body {
   inverseMass: number;
   colorIndex: number;
   contactFrames: number;
+  isStatic?: boolean;
+  isUserCreated?: boolean;
 }
 
 export interface Contact {
@@ -35,7 +37,13 @@ export interface BroadPhaseResult {
 }
 
 export type BroadPhaseMethod = 'naive' | 'spatial' | 'sweep';
-export type ScenarioName = 'uniform' | 'clusters' | 'horizontal' | 'mixed' | 'giant';
+export type ScenarioName =
+  | 'uniform'
+  | 'clusters'
+  | 'horizontal'
+  | 'mixed'
+  | 'giant'
+  | 'tunneling';
 
 export interface PairBuffer {
   readonly count: number;
